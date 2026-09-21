@@ -1,42 +1,44 @@
 /**
- * Authorization for a caller-supplied per-spawn model selector.
+ * Validation for a caller-supplied per-spawn model selector.
  *
- * The agent may pick *which* model a subagent runs on, but not *what models
- * exist*: the legal set is everything the user already controls — model role
- * aliases (`@smol`, `@slow`, custom roles they configured), selectors they
- * tagged in chat with `^model`, and anything explicitly listed in
- * `task.allowedSpawnModels`.
+ * Any model the session can actually reach is fair game, plus every model
+ * role alias (`@smol`, `@slow`, custom roles). The only thing rejected is a
+ * selector that resolves to nothing.
  *
- * Validation here is mandatory rather than advisory.
- * `resolveConfiguredModelPatterns` yields `[]` for an unresolvable selector,
+ * That rejection is the whole point and is not optional:
+ * `resolveConfiguredModelPatterns` yields `[]` for an unresolvable selector
  * and `resolveEffectiveAgentModelSelection` then falls through to the session
- * default — so an unchecked typo runs silently on the wrong model instead of
- * failing. Reject loudly and name the legal values.
+ * default — so an unchecked typo runs the spawn on the wrong model with no
+ * signal to anyone. This is the failure mode that got per-call model removed
+ * upstream (#6438); catching it here is what makes the field safe to expose.
+ *
+ * `task.allowedSpawnModels` is an optional lockdown: leave it empty (the
+ * default) and every available model is spawnable; set it and spawns are
+ * restricted to those entries.
  */
-import type { Settings } from "../config/settings";
 import { getKnownRoleIds, MODEL_ROLE_ALIAS_PREFIX } from "../config/model-roles";
-import { normalizeModelPatternList } from "../config/model-resolver";
+import type { ModelRegistry } from "../config/model-registry";
+import { formatModelString, normalizeModelPatternList, resolveModelOverride } from "../config/model-resolver";
+import type { Settings } from "../config/settings";
 
-/** Everything a caller may name in a spawn's `model` field, already normalized. */
+/** What a caller may name in a spawn's `model` field for this session. */
 export interface SpawnModelAuthorization {
 	/** Role ids (without the `@` sigil) the user's settings define. */
 	roles: readonly string[];
-	/** Canonical `provider/id` selectors authorized by `^model` mentions. */
-	mentioned: readonly string[];
-	/** Extra selectors pre-approved via `task.allowedSpawnModels`. */
-	allowlisted: readonly string[];
+	/** When non-empty, spawns are restricted to these selectors (plus roles). */
+	allowlist: readonly string[];
+	/** Resolves a concrete selector against the session's reachable models. */
+	resolve: (pattern: string) => boolean;
 }
 
 interface SpawnModelPolicyHost {
 	settings: Settings;
-	getAuthorizedModelSelectors?: () => readonly string[];
+	modelRegistry?: ModelRegistry;
 }
 
 /**
  * Strip a trailing `:level` thinking suffix so `@smol:high` and
- * `anthropic/claude-opus-5:xhigh` authorize on their base selector. A bare
- * `provider/id` has no colon; role aliases never contain one before the
- * suffix.
+ * `anthropic/claude-opus-5:xhigh` validate on their base selector.
  */
 function baseSelector(selector: string): string {
 	const colon = selector.lastIndexOf(":");
@@ -53,26 +55,29 @@ function roleIdOf(selector: string): string | undefined {
 
 /** Snapshot the legal spawn-model vocabulary for this session. */
 export function spawnModelAuthorization(host: SpawnModelPolicyHost): SpawnModelAuthorization {
-	const allowlisted = normalizeModelPatternList(host.settings.get("task.allowedSpawnModels"));
+	const registry = host.modelRegistry;
 	return {
 		roles: getKnownRoleIds(host.settings),
-		mentioned: host.getAuthorizedModelSelectors?.() ?? [],
-		allowlisted,
+		allowlist: normalizeModelPatternList(host.settings.get("task.allowedSpawnModels")),
+		// No registry (isolated tests, host embeddings) means nothing local can
+		// prove a selector wrong, so accept it and let the provider decide.
+		resolve: registry
+			? pattern => resolveModelOverride([pattern], registry, host.settings).model !== undefined
+			: () => true,
 	};
 }
 
-/** Human-readable list of what a caller may pass, for the rejection message. */
+/** Human-readable description of what a caller may pass, for prompts and errors. */
 export function describeSpawnModelAuthorization(auth: SpawnModelAuthorization): string {
-	const parts: string[] = [auth.roles.map(role => `${MODEL_ROLE_ALIAS_PREFIX}${role}`).join(", ")];
-	if (auth.mentioned.length > 0) parts.push(auth.mentioned.join(", "));
-	if (auth.allowlisted.length > 0) parts.push(auth.allowlisted.join(", "));
-	return parts.filter(Boolean).join(", ");
+	const roles = auth.roles.map(role => `${MODEL_ROLE_ALIAS_PREFIX}${role}`).join(", ");
+	if (auth.allowlist.length > 0) return `${auth.allowlist.join(", ")}, ${roles}`;
+	return `any available model (e.g. \`anthropic/claude-opus-5\`), or a role alias: ${roles}`;
 }
 
 /**
- * Reason `selector` is not authorized, or `undefined` when it is. A caller may
- * pass a comma-separated fallback chain; every entry must authorize
- * independently, because any of them can be the one that actually runs.
+ * Reason `selector` cannot be used, or `undefined` when it can. A caller may
+ * pass a comma-separated fallback chain; every entry must be usable, because
+ * any of them can be the one that actually runs.
  */
 export function unauthorizedSpawnModelReason(
 	selector: string | readonly string[],
@@ -87,8 +92,19 @@ export function unauthorizedSpawnModelReason(
 			if (auth.roles.includes(role)) continue;
 			return `unknown model role "${pattern}"`;
 		}
-		if (auth.mentioned.includes(base) || auth.allowlisted.includes(base)) continue;
-		return `model "${pattern}" is not authorized for spawning`;
+		if (auth.allowlist.length > 0) {
+			if (auth.allowlist.includes(base)) continue;
+			return `model "${pattern}" is not in task.allowedSpawnModels`;
+		}
+		if (auth.resolve(pattern)) continue;
+		return `no available model matches "${pattern}"`;
 	}
 	return undefined;
+}
+
+/** Canonical `provider/id` for a resolved selector, for display on the spawn card. */
+export function resolveSpawnModelDisplay(pattern: string, host: SpawnModelPolicyHost): string | undefined {
+	if (!host.modelRegistry) return undefined;
+	const resolved = resolveModelOverride([pattern], host.modelRegistry, host.settings).model;
+	return resolved ? formatModelString(resolved) : undefined;
 }

@@ -340,6 +340,19 @@ export async function resolveEffectiveSubagentPolicy(
 		? agentServiceTierOverrides[agentName]
 		: undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	// A caller-supplied selector must resolve; an unresolvable one would fall
+	// through to the session default and silently run on the wrong model.
+	const requestedModel = request.modelAuthorized ? undefined : request.model;
+	if (requestedModel !== undefined && normalizeModelPatternList(requestedModel).length > 0) {
+		const auth = spawnModelAuthorization(request.session);
+		const reason = unauthorizedSpawnModelReason(requestedModel, auth);
+		if (reason) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Cannot spawn on that model: ${reason}. Use ${describeSpawnModelAuthorization(auth)}.`,
+			);
+		}
+	}
 	const modelResolution = {
 		requestModel: request.model,
 		settingsOverride: agentModelOverrides[agentName],
@@ -352,21 +365,6 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	// Fail closed: any caller that did not explicitly mark its selector as
-	// user-supplied is treated as model-controlled and must authorize. An
-	// empty/whitespace selector carries no choice at all and falls through to
-	// the agent definition, same as omitting the field.
-	const requestedModel = request.modelAuthorized ? undefined : request.model;
-	if (requestedModel !== undefined && normalizeModelPatternList(requestedModel).length > 0) {
-		const auth = spawnModelAuthorization(request.session);
-		const reason = unauthorizedSpawnModelReason(requestedModel, auth);
-		if (reason) {
-			throw new StructuredSubagentError(
-				"preflight",
-				`Cannot spawn on that model: ${reason}. Allowed: ${describeSpawnModelAuthorization(auth)}. Ask the user to tag a model with ^<model> to authorize it.`,
-			);
-		}
-	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {

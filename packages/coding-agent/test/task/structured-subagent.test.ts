@@ -425,30 +425,29 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("rejects a model-chosen selector the user never authorized", async () => {
+	it("accepts a concrete model selector with no prior tagging", async () => {
 		mockDiscovery();
-		// Fail-closed: without this the resolver silently falls back to the
-		// session default, so an unauthorized (or typo'd) selector would run
-		// the spawn on the wrong model with no signal to anyone.
-		await expect(resolveEffectiveSubagentPolicy(request({ model: "anthropic/claude-opus-5" }))).rejects.toThrow(
-			/not authorized/,
-		);
+		// The session here has no model registry, so nothing local can disprove
+		// the selector and it passes straight through to resolution.
+		const policy = await resolveEffectiveSubagentPolicy(request({ model: "anthropic/claude-opus-5" }));
+		expect(policy.modelOverride).toEqual(["anthropic/claude-opus-5"]);
 	});
 
-	it("accepts a model-chosen role alias without authorization", async () => {
+	it("accepts a model-chosen role alias", async () => {
 		mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(request({ model: "@smol" }));
 		expect(policy.modelRole).toBe("smol");
 	});
 
-	it("accepts a selector the user tagged in this session", async () => {
+	it("rejects a selector no available model matches", async () => {
 		mockDiscovery();
-		const tagged = session();
-		tagged.getAuthorizedModelSelectors = () => ["anthropic/claude-opus-5"];
-		const policy = await resolveEffectiveSubagentPolicy(
-			request({ session: tagged, model: "anthropic/claude-opus-5" }),
-		);
-		expect(policy.modelOverride).toEqual(["anthropic/claude-opus-5"]);
+		// Without this the resolver falls back to the session default and the
+		// spawn silently runs on a model nobody asked for.
+		const scoped = session();
+		scoped.modelRegistry = { getAvailable: () => [] } as unknown as typeof scoped.modelRegistry;
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: scoped, model: "anthropic/typo-5" })),
+		).rejects.toThrow(/no available model matches/);
 	});
 
 	it("rejects a read-only agent as a team member", async () => {

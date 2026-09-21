@@ -34,7 +34,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
-{{#if modelEnabled}}  - `model`: Run this member on a specific model. Allowed: {{spawnModelsText}}. Omit to inherit — that is correct unless the task genuinely needs a cheaper or stronger model than the parent. A selector the user has not authorized is rejected; ask them to tag it with `^<model>`.
+{{#if modelEnabled}}  - `model`: Run this member on a specific model. Accepts {{spawnModelsText}}. Omit to inherit, which is right unless the task genuinely needs a cheaper or stronger model. A selector matching no available model is rejected.
 {{/if}}
 {{#if teamsEnabled}}  - `role`: Short label for this member's job on the team (e.g. `backend`, `reviewer`). Shown on every teammate's roster.
 {{/if}}
@@ -57,7 +57,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
-{{#if modelEnabled}}- `model`: Run this subagent on a specific model. Allowed: {{spawnModelsText}}. Omit to inherit.
+{{#if modelEnabled}}- `model`: Run this subagent on a specific model. Accepts {{spawnModelsText}}. Omit to inherit.
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.

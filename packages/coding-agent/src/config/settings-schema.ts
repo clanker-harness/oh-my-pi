@@ -5080,7 +5080,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Per-Task Model",
 			description:
-				"Expose the optional model parameter on task spawns. The value space is already user-controlled: only model role aliases (@smol, @slow, and any role you configured), models you tagged in chat with ^<model>, and entries in task.allowedSpawnModels are accepted — anything else is rejected at preflight.",
+				"Expose the optional model parameter on task spawns, so a subagent can be pinned to a specific model (`provider/id`) or a model role alias. A selector that matches no available model is rejected at preflight instead of silently falling back to the session default.",
 		},
 	},
 
@@ -5090,9 +5090,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Pre-Authorized Spawn Models",
+			label: "Restrict Spawn Models",
 			description:
-				"Extra model selectors a subagent spawn may target without the user tagging them first (e.g. anthropic/claude-opus-5). Role aliases are always allowed and need no entry here.",
+				"Restrict which models a subagent spawn may target. Empty (the default) allows any available model. Set it to lock spawns down to specific selectors; model role aliases stay usable either way.",
 		},
 	},
 

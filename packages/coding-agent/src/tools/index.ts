@@ -362,8 +362,6 @@ export interface ToolSession {
 	getSessionSpawns: () => string | null;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
-	/** Canonical `provider/id` selectors the user authorized this session via `^model` mentions. */
-	getAuthorizedModelSelectors?: () => readonly string[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */

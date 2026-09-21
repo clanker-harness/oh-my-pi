@@ -341,29 +341,17 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("rejects an unauthorized per-call model on agent()", async () => {
-		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		// Per-call model selection was reinstated on `agent()` (it had been
-		// removed in #6438 because `model: "default"` silently rerouted children
-		// onto the parent session model). The silent-reroute hazard is now
-		// closed by authorization rather than by dropping the field: a selector
-		// the user never authorized fails loudly instead of falling through.
-		await expect(
-			runEvalAgentAndWait({ prompt: "work", model: "p/unauthorized" }, { session: makeSession() }),
-		).rejects.toThrow(/not authorized/);
-	});
-
-	it("forwards an authorized per-call model on agent()", async () => {
+	it("forwards a per-call model on agent()", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		const session = makeSession();
-		session.getAuthorizedModelSelectors = () => ["p/tagged"];
-		await runEvalAgentAndWait({ prompt: "work", model: "p/tagged" }, { session });
+		// Per-call model was removed in #6438 because `model: "default"` could
+		// silently reroute children onto the parent session model. It is back,
+		// with the silent-reroute hazard closed by rejecting selectors that
+		// resolve to nothing rather than by dropping the field.
+		await runEvalAgentAndWait({ prompt: "work", model: "p/other" }, { session: makeSession() });
 
-		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/tagged"]);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/other"]);
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };

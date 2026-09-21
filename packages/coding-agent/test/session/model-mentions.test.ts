@@ -105,9 +105,9 @@ describe("model mentions", () => {
 		expect(mentions.mentions).toHaveLength(1);
 	});
 
-	test("exposes tagged selectors as spawn authorizations", () => {
+	test("keeps one pseudonym per canonical selector", () => {
 		mentions.expandMentions("^a/x and ^b/y");
-		expect(mentions.authorizedSelectors()).toEqual(["a/x", "b/y"]);
+		expect(mentions.mentions.map(mention => mention.selector)).toEqual(["a/x", "b/y"]);
 	});
 
 	test("leaves unresolvable tokens literal and reuses pseudonyms per selector", () => {

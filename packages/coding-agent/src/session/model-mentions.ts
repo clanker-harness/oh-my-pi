@@ -99,15 +99,6 @@ export class ModelMentionRegistry {
 		return parseModelPattern(selector, models as Model[], getModelMatchPreferences(this.#host.settings?.())).model;
 	}
 
-	/**
-	 * Canonical `provider/id` selectors the user authorized this session by
-	 * mentioning them. The spawn-model policy treats these as pre-approved, so
-	 * the agent may target one on any agent type — not only the `m<N>` clone.
-	 */
-	authorizedSelectors(): string[] {
-		return this.#mentions.map(mention => mention.selector);
-	}
-
 	/** Register user-tagged models and replace their tokens with persisted agent tags. */
 	expandMentions(text: string): string {
 		if (!text.includes("^")) return text;

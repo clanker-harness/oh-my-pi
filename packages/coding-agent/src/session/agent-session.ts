@@ -7903,15 +7903,6 @@ export class AgentSession {
 		return this.#modelMentions.sessionAgents();
 	}
 
-	/**
-	 * Canonical selectors the user authorized by tagging a model in chat. The
-	 * spawn-model policy treats these as pre-approved targets for any agent
-	 * type, so `^fable ... with scout` works, not only the `m<N>` clone.
-	 */
-	getAuthorizedModelSelectors(): readonly string[] {
-		return this.#modelMentions.authorizedSelectors();
-	}
-
 	/** Registered model pseudonyms on the active branch. */
 	get modelMentions(): readonly ModelMention[] {
 		return this.#modelMentions.mentions;
