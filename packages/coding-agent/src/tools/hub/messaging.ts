@@ -18,7 +18,7 @@ import type { Settings } from "../../config/settings";
 import { IrcAwaitTargetStopped, IrcBus } from "../../irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID, TEAM_ADDRESS_PREFIX } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 
@@ -222,9 +222,20 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	// `team:<name>` is a group broadcast: same fan-out semantics as "all", but
+	// scoped to the caller's peer group so a member can talk to its own team
+	// without spraying every agent in the process.
+	const teamTarget = to.startsWith(TEAM_ADDRESS_PREFIX) ? to.slice(TEAM_ADDRESS_PREFIX.length).trim() : undefined;
+	const isBroadcast = to === "all" || teamTarget !== undefined;
+	if (teamTarget !== undefined && !teamTarget) {
+		return hubErrorResult('`team:` needs a team name, e.g. to:"team:refactor".', {
+			op: "send",
+			from: senderId,
+			to,
+		});
+	}
 	if (isBroadcast && params.await) {
-		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
+		return hubErrorResult("`await` is invalid with a broadcast target — broadcasts have no single replier.", {
 			op: "send",
 			from: senderId,
 			to,
@@ -276,7 +287,12 @@ export async function executeSend(
 		// Broadcasts fan out to live peers only (running | idle); reviving every
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
-		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+		const targets =
+			teamTarget !== undefined
+				? registry.listGroup(teamTarget, senderId).map(ref => ref.id)
+				: isBroadcast
+					? registry.listVisibleTo(senderId).map(ref => ref.id)
+					: [to];
 		// A broadcast that also reaches the main agent delivers the body to it
 		// directly (its own incoming card); relaying the sibling legs to the
 		// main UI would then show the same body once per other recipient.
@@ -296,7 +312,9 @@ export async function executeSend(
 		const lines: string[] = [];
 		const delivered = receipts.filter(receipt => receipt.outcome !== "failed");
 		if (targets.length === 0) {
-			lines.push("No live peers to broadcast to.");
+			lines.push(
+				teamTarget !== undefined ? `No live members in team "${teamTarget}".` : "No live peers to broadcast to.",
+			);
 		} else if (delivered.length === 0) {
 			lines.push("No recipients received the message.");
 		} else {

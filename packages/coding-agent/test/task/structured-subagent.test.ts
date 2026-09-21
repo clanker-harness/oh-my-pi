@@ -416,13 +416,55 @@ describe("structured subagent primitive", () => {
 		});
 
 		const settled = await runStructuredSubagent(
-			request({ session: childSession, model: "openai/gpt-4o", retainArtifacts: true }),
+			request({ session: childSession, model: "openai/gpt-4o", modelAuthorized: true, retainArtifacts: true }),
 		);
 
 		expect(settled.policy.modelRole).toBeUndefined();
 		expect(dispatched[0]?.modelRole).toBeUndefined();
 		expect(settled.result.modelRole).toBeUndefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects a model-chosen selector the user never authorized", async () => {
+		mockDiscovery();
+		// Fail-closed: without this the resolver silently falls back to the
+		// session default, so an unauthorized (or typo'd) selector would run
+		// the spawn on the wrong model with no signal to anyone.
+		await expect(resolveEffectiveSubagentPolicy(request({ model: "anthropic/claude-opus-5" }))).rejects.toThrow(
+			/not authorized/,
+		);
+	});
+
+	it("accepts a model-chosen role alias without authorization", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(request({ model: "@smol" }));
+		expect(policy.modelRole).toBe("smol");
+	});
+
+	it("accepts a selector the user tagged in this session", async () => {
+		mockDiscovery();
+		const tagged = session();
+		tagged.getAuthorizedModelSelectors = () => ["anthropic/claude-opus-5"];
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: tagged, model: "anthropic/claude-opus-5" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-opus-5"]);
+	});
+
+	it("rejects a read-only agent as a team member", async () => {
+		// A read-only agent never receives `hub`, so a team roster would be
+		// unusable to it — the prompt would advertise a broadcast it cannot send.
+		mockDiscovery({ ...AGENT, tools: ["read", "grep"] });
+		await expect(resolveEffectiveSubagentPolicy(request({ team: "refactor" }))).rejects.toThrow(
+			/read-only and has no `hub` tool/,
+		);
+	});
+
+	it("accepts a coordinating agent as a team member", async () => {
+		mockDiscovery();
+		const policy = await resolveEffectiveSubagentPolicy(request({ team: "refactor", role: "backend" }));
+		expect(policy.team).toBe("refactor");
+		expect(policy.role).toBe("backend");
 	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {

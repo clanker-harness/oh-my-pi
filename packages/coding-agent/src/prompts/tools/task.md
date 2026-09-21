@@ -22,6 +22,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 # Inputs
 {{#if batchEnabled}}
 - `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
+{{#if teamsEnabled}}- `team`: Optional group name. Every item in this call becomes an addressable member of that team: members see each other in full on their roster and can broadcast with `hub` op:"send" to:"team:<name>". Use it when the members must coordinate with each other, not merely run in parallel. Read-only agents have no `hub` tool and are rejected as team members — put those on a plain parallel batch instead.
+{{/if}}
 - `tasks[]`: Array of subagents to spawn.
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
   - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
@@ -31,6 +33,10 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if evalToolsEnabled}}  - `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
+{{/if}}
+{{#if modelEnabled}}  - `model`: Run this member on a specific model. Allowed: {{spawnModelsText}}. Omit to inherit — that is correct unless the task genuinely needs a cheaper or stronger model than the parent. A selector the user has not authorized is rejected; ask them to tag it with `^<model>`.
+{{/if}}
+{{#if teamsEnabled}}  - `role`: Short label for this member's job on the team (e.g. `backend`, `reviewer`). Shown on every teammate's roster.
 {{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
@@ -50,6 +56,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if evalToolsEnabled}}- `tools`: Names of eval-defined tools (`@tool` in Python, `tool(fn, {…})` in JS) to expose to this subagent; each runs inside your kernel when the subagent calls it.
 {{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
+{{/if}}
+{{#if modelEnabled}}- `model`: Run this subagent on a specific model. Allowed: {{spawnModelsText}}. Omit to inherit.
 {{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.

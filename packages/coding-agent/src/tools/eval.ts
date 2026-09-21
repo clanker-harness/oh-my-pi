@@ -33,6 +33,7 @@ import {
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
+import { describeSpawnModelAuthorization, spawnModelAuthorization } from "../task/spawn-model-policy";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -202,6 +203,8 @@ export interface EvalToolDescriptionOptions {
 	eagerDelegation?: boolean;
 	/** Enabled capability documentation appended to the eval-only prompt. */
 	preludeDocumentation?: string;
+	/** Rendered list of legal `model` selectors; empty when per-spawn model selection is off. */
+	spawnModelsText?: string;
 }
 
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
@@ -217,6 +220,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+		spawnModelsText: options.spawnModelsText ?? "",
 		preludeDocumentation: options.preludeDocumentation,
 	});
 }
@@ -328,6 +332,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				evalTools: this.session.settings.get("eval.tools.enabled"),
 				eagerDelegation: sessionDelegationBias(this.session) === "eager",
 				preludeDocumentation,
+				spawnModelsText:
+					this.session.settings.get("task.enableModelSelection") &&
+					this.session.getPlanModeState?.()?.enabled !== true
+						? describeSpawnModelAuthorization(spawnModelAuthorization(this.session))
+						: "",
 			});
 		}
 		return this.#codeModeDescription(base) ?? base;

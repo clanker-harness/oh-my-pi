@@ -30,6 +30,19 @@ You NEVER modify files outside this tree or in the original repository.
 {{/if}}
 
 {{#if ircSelfId}}
+{{#if ircTeam}}
+# Team `{{ircTeam}}`
+You are a member of team `{{ircTeam}}`{{#if ircRole}}, role **{{ircRole}}**{{/if}}. Members:
+{{#each ircTeammates}}
+- `{{this.id}}` — {{this.displayName}}{{#if this.role}} [{{this.role}}]{{/if}} ({{this.status}}){{#if this.activity}}: {{this.activity}}{{/if}}
+{{/each}}
+{{#unless ircTeammates}}
+- (no other members live yet — they may still be starting)
+{{/unless}}
+
+Broadcast to the whole team with `hub` op:"send" to:"team:{{ircTeam}}"; that reaches every member and no one else. Address one member by its id. Your teammates are listed in full above and are NOT subject to the peer cap below.
+{{/if}}
+
 # Peers
 You can reach other live agents via the `hub` tool. Your id is `{{ircSelfId}}`. Currently visible peers:
 {{#if ircPeers}}

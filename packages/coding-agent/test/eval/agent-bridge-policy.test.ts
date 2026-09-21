@@ -341,19 +341,29 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("rejects an unauthorized per-call model on agent()", async () => {
+		mockAgents();
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		// Per-call model selection was reinstated on `agent()` (it had been
+		// removed in #6438 because `model: "default"` silently rerouted children
+		// onto the parent session model). The silent-reroute hazard is now
+		// closed by authorization rather than by dropping the field: a selector
+		// the user never authorized fails loudly instead of falling through.
+		await expect(
+			runEvalAgentAndWait({ prompt: "work", model: "p/unauthorized" }, { session: makeSession() }),
+		).rejects.toThrow(/not authorized/);
+	});
+
+	it("forwards an authorized per-call model on agent()", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
+		const session = makeSession();
+		session.getAuthorizedModelSelectors = () => ["p/tagged"];
+		await runEvalAgentAndWait({ prompt: "work", model: "p/tagged" }, { session });
 
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/tagged"]);
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };

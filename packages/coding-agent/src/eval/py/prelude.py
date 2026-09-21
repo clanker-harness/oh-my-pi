@@ -971,6 +971,7 @@ if "__omp_prelude_loaded__" not in globals():
         prompt,
         *,
         agent=None,
+        model=None,
         label=None,
         schema=None,
         schema_mode=None,
@@ -983,6 +984,8 @@ if "__omp_prelude_loaded__" not in globals():
         args = {"prompt": prompt}
         if agent is not None:
             args["agent"] = agent
+        if model is not None:
+            args["model"] = model
         if label is not None:
             args["label"] = label
         if schema is not None:

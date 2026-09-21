@@ -67,11 +67,18 @@ export interface AgentHistorySummary {
 	nestedPatchPaths?: string[];
 }
 
+/** `hub send to:"team:<name>"` addresses every live member of that peer group. */
+export const TEAM_ADDRESS_PREFIX = "team:";
+
 export interface AgentRef {
 	id: string;
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Peer group this agent belongs to; members share a roster and a `team:<id>` broadcast address. */
+	team?: string;
+	/** Member role inside {@link team}, shown on the group roster. */
+	role?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
@@ -104,6 +111,10 @@ export interface RegisterInput {
 	session: AgentSession | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
+	/** Peer group this agent joins. */
+	team?: string;
+	/** Member role inside that group. */
+	role?: string;
 	/** Last persisted task summary, when restoring a historical agent. */
 	activity?: string;
 	/** Original registration timestamp, when known from persisted history. */
@@ -150,6 +161,8 @@ export class AgentRegistry {
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			team: input.team,
+			role: input.role,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -335,6 +348,23 @@ export class AgentRegistry {
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
 			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+		);
+	}
+
+	/**
+	 * Live members of one peer group, caller excluded. Group membership is the
+	 * only grouping the registry models beyond `parentId`, and it is what makes
+	 * a team roster and `team:<id>` broadcast cheap: both are one filter.
+	 * Parked members are excluded for the same reason `listVisibleTo` excludes
+	 * them — reviving a whole team on one broadcast is a stampede.
+	 */
+	listGroup(team: string, excludeId?: string): AgentRef[] {
+		return this.list().filter(
+			ref =>
+				ref.team === team &&
+				ref.id !== excludeId &&
+				ref.kind !== "advisor" &&
+				(ref.status === "running" || ref.status === "idle"),
 		);
 	}
 

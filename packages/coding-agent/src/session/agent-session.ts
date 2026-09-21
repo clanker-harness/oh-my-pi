@@ -1392,6 +1392,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			scopedModels: () => this.scopedModels.map(s => s.model),
+			settings: () => this.settings,
 		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
@@ -7900,6 +7901,15 @@ export class AgentSession {
 	/** Session-local general-purpose agents pinned to user-tagged models. */
 	getSessionAgents(): AgentDefinition[] {
 		return this.#modelMentions.sessionAgents();
+	}
+
+	/**
+	 * Canonical selectors the user authorized by tagging a model in chat. The
+	 * spawn-model policy treats these as pre-approved targets for any agent
+	 * type, so `^fable ... with scout` works, not only the `m<N>` clone.
+	 */
+	getAuthorizedModelSelectors(): readonly string[] {
+		return this.#modelMentions.authorizedSelectors();
 	}
 
 	/** Registered model pseudonyms on the active branch. */

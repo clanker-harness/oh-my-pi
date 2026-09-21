@@ -118,66 +118,30 @@ function createTaskSchema(options: {
 	defaultAgent: string;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
+	modelEnabled: boolean;
+	teamsEnabled: boolean;
 }): BaseType {
-	const agent = taskAgentSchemaRule(options.defaultAgent);
-	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
-	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				...effortField,
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				...toolsField,
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
-		const item = type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"+": "delete",
-		});
-		return type.raw({
-			context: "string",
-			tasks: item.array(),
-			"+": "delete",
-		});
-	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			...effortField,
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			...toolsField,
-			"isolated?": "boolean",
-			"+": "delete",
-		});
-	}
-	return type.raw({
+	// One item shape, assembled from the enabled axes. Every branch below used to
+	// repeat the field list; a missed field in one copy is a silently narrower
+	// wire schema for exactly one settings combination.
+	const item = type.raw({
 		"name?": "string",
-		agent,
+		agent: taskAgentSchemaRule(options.defaultAgent),
 		task: "string",
-		...effortField,
+		...(options.effortEnabled ? { "effort?": effortRule } : {}),
+		...(options.modelEnabled ? { "model?": "string" } : {}),
+		...(options.teamsEnabled && options.batchEnabled ? { "role?": "string" } : {}),
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
-		...toolsField,
+		...(options.evalToolsEnabled ? { "tools?": "string[]" } : {}),
+		...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
+		"+": "delete",
+	});
+	if (!options.batchEnabled) return item;
+	return type.raw({
+		context: "string",
+		...(options.teamsEnabled ? { "team?": "string" } : {}),
+		tasks: item.array(),
 		"+": "delete",
 	});
 }
@@ -189,19 +153,32 @@ export function getTaskSchema(options: {
 	effortEnabled?: boolean;
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
 	evalToolsEnabled?: boolean;
+	/** Advertise the per-spawn `model` field (`task.enableModelSelection`, default on). */
+	modelEnabled?: boolean;
+	/** Advertise the batch `team` / per-item `role` fields (`task.teams.enabled`). */
+	teamsEnabled?: boolean;
 	defaultAgent?: string;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled) {
+	const modelEnabled = options.modelEnabled ?? false;
+	const teamsEnabled = options.teamsEnabled ?? false;
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && !modelEnabled && !teamsEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${modelEnabled ? "model" : "nomodel"}:${teamsEnabled ? "team" : "noteam"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
-	const schema = createTaskSchema({ ...options, effortEnabled, evalToolsEnabled, defaultAgent });
+	const schema = createTaskSchema({
+		...options,
+		effortEnabled,
+		evalToolsEnabled,
+		modelEnabled,
+		teamsEnabled,
+		defaultAgent,
+	});
 	taskSchemaCache.set(key, schema);
 	return schema;
 }

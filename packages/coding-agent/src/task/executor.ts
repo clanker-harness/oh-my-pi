@@ -49,7 +49,7 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
@@ -307,21 +307,39 @@ export interface IrcPeerRosterRow {
 	kind: string;
 	status: string;
 	activity?: string;
+	/** Member role inside a shared team, when the row is a teammate. */
+	role?: string;
 }
 
 export interface IrcPeerRosterData {
 	/** Live (running+idle) peer rows, bounded at DEFAULT_HUB_LIST_LIMIT. */
 	peers: IrcPeerRosterRow[];
+	/** Teammates sharing the caller's group, listed ahead of and excluded from `peers`. */
+	teammates: IrcPeerRosterRow[];
+	/** The caller's group name, when it has one. */
+	team?: string;
 	/** Current-root parked refs, counted but never named. */
 	parkedCount: number;
 	/** Live rows dropped by the bound; the prompt reports them truthfully. */
 	omittedCount: number;
 }
 
+function toRosterRow(peer: AgentRef): IrcPeerRosterRow {
+	return {
+		id: peer.id,
+		displayName: peer.displayName,
+		kind: peer.kind,
+		status: peer.status,
+		activity: peer.activity,
+		role: peer.role,
+	};
+}
+
 export function collectIrcPeerRoster(
 	registry: AgentRegistry,
 	selfId: string,
 	rootSessionFile?: string,
+	team?: string,
 ): IrcPeerRosterData {
 	// Same ordering as `hub list`: running before idle, then newest activity
 	// first — so the cap keeps the newest relevant siblings, not an
@@ -332,15 +350,15 @@ export function collectIrcPeerRoster(
 			(a, b) =>
 				(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 		);
+	// Teammates are listed in full and exempt from the cap: a member that
+	// cannot see its own team cannot coordinate with it, which is the entire
+	// point of the group. They are removed from `peers` so no row is doubled.
+	const teammates = team ? live.filter(peer => peer.team === team).map(toRosterRow) : [];
+	const teammateIds = new Set(teammates.map(row => row.id));
+	const rest = teammateIds.size > 0 ? live.filter(peer => !teammateIds.has(peer.id)) : live;
 	const limit = DEFAULT_HUB_LIST_LIMIT;
-	const omittedCount = Math.max(0, live.length - limit);
-	const peers = (omittedCount > 0 ? live.slice(0, limit) : live).map(peer => ({
-		id: peer.id,
-		displayName: peer.displayName,
-		kind: peer.kind,
-		status: peer.status,
-		activity: peer.activity,
-	}));
+	const omittedCount = Math.max(0, rest.length - limit);
+	const peers = (omittedCount > 0 ? rest.slice(0, limit) : rest).map(toRosterRow);
 	let parkedCount = 0;
 	for (const ref of registry.list()) {
 		if (
@@ -352,7 +370,7 @@ export function collectIrcPeerRoster(
 			parkedCount++;
 		}
 	}
-	return { peers, parkedCount, omittedCount };
+	return { peers, teammates, ...(team ? { team } : {}), parkedCount, omittedCount };
 }
 
 function withAbortTimeout<T>(
@@ -569,6 +587,10 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Peer group this spawn joins; forwarded to the SDK and recorded on the registry ref. */
+	team?: string;
+	/** Member role inside that group. */
+	role?: string;
 	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
@@ -3752,7 +3774,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile, options.team)
 						: undefined;
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
@@ -3774,6 +3796,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
+						ircTeammates: ircRoster?.teammates ?? [],
+						ircTeam: ircRoster?.team ?? "",
+						ircRole: options.role ?? "",
 						ircSelfId: ircEnabled ? id : "",
 					});
 					return defaultPrompt.length === 0
@@ -3793,6 +3818,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
+				...(options.team ? { agentTeam: options.team } : {}),
+				...(options.role ? { agentRole: options.role } : {}),
 				agentId: id,
 				agentDisplayName: agent.name,
 				agentName: agent.name,

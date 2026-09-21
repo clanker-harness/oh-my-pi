@@ -91,7 +91,26 @@ describe("model mentions", () => {
 		}
 	});
 
-	test("registers only exact available selectors and reuses their pseudonyms", () => {
+	test("resolves a fuzzy mention to its canonical selector", () => {
+		// Users type `^opus`, not `^anthropic/claude-opus-5`. The stored
+		// selector must still be canonical: both the spawn-model authorization
+		// check and downstream model resolution compare against `provider/id`.
+		expect(mentions.expandMentions("^x")).toBe('<model agent="m1" name="X One"/>');
+		expect(mentions.mentions).toEqual([{ agent: "m1", selector: "a/x", name: "X One" }]);
+	});
+
+	test("reuses one pseudonym when fuzzy and exact tokens name the same model", () => {
+		mentions.expandMentions("^x");
+		expect(mentions.expandMentions("^a/x")).toBe('<model agent="m1" name="X One"/>');
+		expect(mentions.mentions).toHaveLength(1);
+	});
+
+	test("exposes tagged selectors as spawn authorizations", () => {
+		mentions.expandMentions("^a/x and ^b/y");
+		expect(mentions.authorizedSelectors()).toEqual(["a/x", "b/y"]);
+	});
+
+	test("leaves unresolvable tokens literal and reuses pseudonyms per selector", () => {
 		expect(mentions.expandMentions("ask ^a/x and ^b/y ignore ^nope/z")).toBe(
 			'ask <model agent="m1" name="X One"/> and <model agent="m2" name="Y"/> ignore ^nope/z',
 		);

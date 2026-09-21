@@ -5072,6 +5072,42 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.enableModelSelection": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Per-Task Model",
+			description:
+				"Expose the optional model parameter on task spawns. The value space is already user-controlled: only model role aliases (@smol, @slow, and any role you configured), models you tagged in chat with ^<model>, and entries in task.allowedSpawnModels are accepted — anything else is rejected at preflight.",
+		},
+	},
+
+	"task.allowedSpawnModels": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Pre-Authorized Spawn Models",
+			description:
+				"Extra model selectors a subagent spawn may target without the user tagging them first (e.g. anthropic/claude-opus-5). Role aliases are always allowed and need no entry here.",
+		},
+	},
+
+	"task.teams.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Subagent Teams",
+			description:
+				'Expose the batch team parameter and per-item role. Members of one team share a group roster in their system prompt and can broadcast to each other with hub send to:"team:<name>".',
+		},
+	},
+
 	"task.maxConcurrency": {
 		type: "number",
 		default: 32,

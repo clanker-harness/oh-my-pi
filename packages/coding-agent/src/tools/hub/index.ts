@@ -66,10 +66,10 @@ const hubSchema = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
-	"to?": type("string").describe('send: recipient agent id or "all"'),
+	"to?": type("string").describe('send: recipient agent id, "all", or "team:<name>" for one peer group'),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
-	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"await?": type("boolean").describe("send: wait for the recipient's reply (invalid with a broadcast target)"),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),

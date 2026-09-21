@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { normalizeModelPatternList, resolveAgentModelSelection } from "../config/model-resolver";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -37,6 +37,12 @@ import {
 	runIsolatedSubprocess,
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
+import {
+	describeSpawnModelAuthorization,
+	spawnModelAuthorization,
+	unauthorizedSpawnModelReason,
+} from "./spawn-model-policy";
+import { isReadOnlyAgent } from "./read-only-policy";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
@@ -82,11 +88,22 @@ export interface StructuredSubagentIdentity {
 /** One normalized child invocation. */
 export interface StructuredSubagentRequest {
 	session: ToolSession;
+	/**
+	 * The selector came from the user (CLI flag, slash command, host code), not
+	 * from the model, so it bypasses spawn-model authorization. Agent-facing
+	 * surfaces (the `task` tool, the eval `agent()` bridge) MUST leave this
+	 * unset — authorization is fail-closed by default.
+	 */
+	modelAuthorized?: boolean;
 	invocationKind: "task" | "eval";
 	assignment: string;
 	context?: string;
 	agent?: string;
 	model?: string | string[];
+	/** Peer group this spawn joins; members share a roster and a `team:<id>` broadcast address. */
+	team?: string;
+	/** Member role label shown on the group roster. */
+	role?: string;
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -141,6 +158,10 @@ export interface EffectiveSubagentPolicy {
 	/** Exact-name `task.agentServiceTierOverrides` entry for this agent, applied after model resolution. */
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	parentActiveModelPattern?: string;
+	/** Normalized peer group id, when this spawn is a team member. */
+	team?: string;
+	/** Member role label inside that group. */
+	role?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
@@ -218,6 +239,9 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	if (request.customTools?.length) {
 		throw new StructuredSubagentError("preflight", "Eval-defined tools are unavailable in plan mode.");
 	}
+	if (request.model !== undefined) {
+		throw new StructuredSubagentError("preflight", "Per-spawn model selection is unavailable in plan mode.");
+	}
 	const isolation = request.isolation;
 	if (
 		isolation &&
@@ -287,8 +311,18 @@ export async function resolveEffectiveSubagentPolicy(
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
 	}
-
 	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	// A team exists so members can talk to each other. A read-only agent never
+	// gets `hub` (read-only-policy deliberately withholds it, and granting it
+	// would hand an exec-tier process surface to an agent classified read-only),
+	// so putting one on a team renders a roster it cannot act on. Reject the
+	// combination instead of shipping a prompt that lies about its capabilities.
+	if (request.team?.trim() && isReadOnlyAgent(effectiveAgent) && !(effectiveAgent.tools ?? []).includes("hub")) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" is read-only and has no \`hub\` tool, so it cannot join team "${request.team.trim()}". Drop \`team\` for this item, or use an agent that can coordinate (e.g. \`task\`).`,
+		);
+	}
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -318,6 +352,21 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	// Fail closed: any caller that did not explicitly mark its selector as
+	// user-supplied is treated as model-controlled and must authorize. An
+	// empty/whitespace selector carries no choice at all and falls through to
+	// the agent definition, same as omitting the field.
+	const requestedModel = request.modelAuthorized ? undefined : request.model;
+	if (requestedModel !== undefined && normalizeModelPatternList(requestedModel).length > 0) {
+		const auth = spawnModelAuthorization(request.session);
+		const reason = unauthorizedSpawnModelReason(requestedModel, auth);
+		if (reason) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Cannot spawn on that model: ${reason}. Allowed: ${describeSpawnModelAuthorization(auth)}. Ask the user to tag a model with ^<model> to authorize it.`,
+			);
+		}
+	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -335,6 +384,8 @@ export async function resolveEffectiveSubagentPolicy(
 		modelRole,
 		serviceTierOverride,
 		parentActiveModelPattern,
+		...(request.team?.trim() ? { team: request.team.trim() } : {}),
+		...(request.role?.trim() ? { role: request.role.trim() } : {}),
 		schema,
 		planMode,
 		isIsolated,
@@ -437,6 +488,8 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		...(policy.team ? { team: policy.team } : {}),
+		...(policy.role ? { role: policy.role } : {}),
 		...(policy.schema.source === "none"
 			? {}
 			: {

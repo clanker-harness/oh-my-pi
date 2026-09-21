@@ -133,7 +133,9 @@ export async function createCleanseAgentRuntime(options: {
 				invocationKind: "task",
 				assignment: prompt.render(discoveryPrompt, { request }),
 				agent: "task",
+				// `--model` came from the operator's command line, not the model.
 				model: modelSelector,
+				modelAuthorized: true,
 				outputSchema: DISCOVERY_SCHEMA,
 				identity: { label: "CleanseDiscovery" },
 				enableLsp: true,
@@ -168,6 +170,7 @@ export async function createCleanseAgentRuntime(options: {
 					assignment: renderAssignment(assignment, context.peers, context.worker, context.checkers),
 					agent: "sonic",
 					model: modelSelector,
+					modelAuthorized: true,
 					identity: { id: agentId, label: name },
 					index: assignment.index,
 					enableLsp: true,
