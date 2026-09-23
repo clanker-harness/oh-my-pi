@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `appleFmAvailability`, `appleFmGenerate`, and `appleFmCancel` native bindings
+- Added `Encoding.Jev` to `countTokens` for offline TypeSafe Jev 1.13 `state` input-token counts (request frame excluded), reconstructed from live API measurements
+
+## [18.2.11] - 2026-09-23
+
+### Changed
+
+- Improved `warmHighlighter()` so it prepares TypeScript, TSX, JavaScript, Bash, Python, Rust, and Markdown highlighting in the background, reducing delays on the first highlight for these languages.
+
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stale workspace addons failing when first used; the error now identifies the addon and provides the command to rebuild native addons.
+- Fixed background bash jobs hanging indefinitely when output forwarding stalls.
+
 ## [18.2.7] - 2026-09-21
 
 ### Added
