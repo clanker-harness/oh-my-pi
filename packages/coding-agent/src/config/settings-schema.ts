@@ -1135,6 +1135,17 @@ export const SETTINGS_SCHEMA = {
 				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
+	"tui.fullscreen": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Fullscreen Mode",
+			description:
+				"Run the session full-screen like Claude Code: the prompt stays pinned, the mouse wheel and PgUp/PgDn scroll the transcript inside omp (no terminal or tmux scrollback), and drag-to-select copies to the clipboard. Off prints into the terminal's native scrollback. PI_TUI_FULLSCREEN=0/1 overrides",
+		},
+	},
 	"tui.mouse": {
 		type: "boolean",
 		default: false,

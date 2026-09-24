@@ -6,6 +6,7 @@ import {
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
+	type SgrMouseEvent,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -763,9 +764,21 @@ export class InputController {
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.motion) this.#updateHoverHighlight(event.row);
-		else if (event.leftClick) this.#focusClickedAgent(event.row);
+		if (event.motion) this.#updateHoverHighlight(this.#viewportCandidates(event.row));
+		else if (event.leftClick) this.#focusClickedAgent(this.#viewportCandidates(event.row));
 		return { consume: true };
+	}
+
+	/**
+	 * Fullscreen main view pointer events the composer did not claim for
+	 * scrolling or selection: chrome clicks focus agents and motion drives the
+	 * hover band. Fullscreen frames paint from screen row 0, so the composer's
+	 * click spans are already in screen rows.
+	 */
+	handleFullscreenPointer(event: SgrMouseEvent): void {
+		const candidates = this.ctx.resolveViewportClickCandidates(event.row);
+		if (event.motion) this.#updateHoverHighlight(candidates);
+		else if (event.leftClick) this.#focusClickedAgent(candidates);
 	}
 
 	/**
@@ -773,8 +786,8 @@ export class InputController {
 	 * is id-anchored in the composer, so it follows an agent whose rows shift
 	 * while streaming; pointing at chrome clears it.
 	 */
-	#updateHoverHighlight(screenRow: number): void {
-		const hovered = this.#viewportCandidates(screenRow)[0];
+	#updateHoverHighlight(candidates: readonly string[]): void {
+		const hovered = candidates[0];
 		if (hovered === this.#lastHoverClickId) return;
 		this.#lastHoverClickId = hovered;
 		this.ctx.setClickHoverId(hovered);
@@ -801,8 +814,7 @@ export class InputController {
 		this.#lastHoverClickId = undefined;
 	}
 
-	#focusClickedAgent(screenRow: number): void {
-		const candidates = this.#viewportCandidates(screenRow);
+	#focusClickedAgent(candidates: readonly string[]): void {
 		if (candidates.length === 0) return;
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));

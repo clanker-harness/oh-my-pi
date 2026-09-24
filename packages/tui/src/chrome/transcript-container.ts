@@ -609,6 +609,16 @@ export class TranscriptContainer extends Container {
 		return rows.length > cap ? rows.slice(rows.length - cap) : rows;
 	}
 
+	/**
+	 * Full render for fullscreen main view, which scrolls the whole ledger in
+	 * place of native history. Unlike {@link render} it advances the animation
+	 * frame, since `renderViewport` (the usual frame source) never runs there.
+	 */
+	renderAll(width: number, frame: AnimationFrame): readonly string[] {
+		this.#lastFrame = frame;
+		return this.render(width);
+	}
+
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();

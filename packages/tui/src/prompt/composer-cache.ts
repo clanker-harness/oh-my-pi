@@ -192,6 +192,7 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 	const spellingTypoDetection = field(rawPreferences, "spellingTypoDetection");
 	const spellingAutocomplete = field(rawPreferences, "spellingAutocomplete");
 	const spellingAutocorrect = field(rawPreferences, "spellingAutocorrect");
+	const fullscreen = field(rawPreferences, "fullscreen");
 	if (
 		typeof quiet !== "boolean" ||
 		typeof composerShape !== "string" ||
@@ -205,7 +206,9 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 		typeof autocompleteMaxVisible !== "number" ||
 		typeof spellingTypoDetection !== "boolean" ||
 		typeof spellingAutocomplete !== "boolean" ||
-		typeof spellingAutocorrect !== "boolean"
+		typeof spellingAutocorrect !== "boolean" ||
+		// Absent in caches written before the preference existed: default it.
+		(fullscreen !== undefined && typeof fullscreen !== "boolean")
 	) {
 		return undefined;
 	}
@@ -239,6 +242,7 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 			spellingTypoDetection,
 			spellingAutocomplete,
 			spellingAutocorrect,
+			fullscreen: fullscreen === true,
 		},
 		theme: { symbolPreset, colorBlindMode, darkTheme, lightTheme },
 	};

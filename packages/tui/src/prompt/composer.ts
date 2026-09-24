@@ -1,5 +1,8 @@
 import type { EditorTopBorder } from "../components/composer/types";
 import { Spacer } from "../components/spacer";
+import { getKeybindings } from "../keybindings";
+import { matchesKey } from "../keys";
+import { parseSgrMouse, type SgrMouseEvent } from "../mouse";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
@@ -20,6 +23,8 @@ import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./welc
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
+/** Rows one wheel notch scrolls the fullscreen body; matches the fullscreen overlays' step. */
+const FULLSCREEN_WHEEL_ROWS = 3;
 
 /** Live settings that affect the composer before and after session adoption. */
 export interface ComposerPreferences {
@@ -33,6 +38,8 @@ export interface ComposerPreferences {
 	readonly spellingTypoDetection: boolean;
 	readonly spellingAutocomplete: boolean;
 	readonly spellingAutocorrect: boolean;
+	/** Fullscreen main view: alternate buffer, pinned chrome, in-app transcript scrolling. */
+	readonly fullscreen: boolean;
 }
 
 /** Settings-schema-compatible defaults used when constructing a dependency-free composer. */
@@ -47,6 +54,9 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	spellingTypoDetection: true,
 	spellingAutocomplete: true,
 	spellingAutocorrect: false,
+	// A dependency-free composer (render CLI, tests) keeps the inline layout;
+	// interactive sessions opt in through the `tui.fullscreen` setting.
+	fullscreen: false,
 };
 
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
@@ -138,6 +148,39 @@ export interface ViewportClickSpan {
 	/** Candidate subagent ids for a span-local row. */
 	candidates: (local: number) => string[];
 }
+
+/**
+ * Shift a click span by `base` rows into a frame of `length` rows, clipping
+ * it to the frame. A clipped head offsets the callback: without the skew the
+ * first visible row would hit-test as span-local row 0.
+ */
+function shiftClickSpan(span: ViewportClickSpan, base: number, length: number, into: ViewportClickSpan[]): void {
+	const start = span.start + base;
+	const end = Math.min(span.end + base, length);
+	const clamped = Math.max(0, start);
+	if (end <= clamped) return;
+	const skew = clamped - start;
+	into.push({ start: clamped, end, candidates: (local: number) => span.candidates(local + skew) });
+}
+
+/** A cell in the fullscreen body: `row` indexes the scrollable content, `col` is a terminal column. */
+interface FullscreenPoint {
+	row: number;
+	col: number;
+}
+
+/** Host hooks for fullscreen main-view input the composer cannot complete alone. */
+export interface FullscreenInputHandlers {
+	/** A drag selection finished; put `text` on the clipboard. */
+	copy?: (text: string) => void;
+	/** A pointer event outside scrolling/selection (chrome click, hover), in screen rows. */
+	pointer?: (event: SgrMouseEvent) => void;
+}
+
+const SELECTION_ON = "\x1b[7m";
+const SELECTION_OFF = "\x1b[27m";
+/** Full SGR resets inside a selected slice would cancel the reverse video; it is re-opened after each. */
+const SGR_RESET = /\x1b\[0?m/g;
 
 /**
  * Row-level click target: maps rendered rows to subagent ids. Implemented by
@@ -248,6 +291,17 @@ export class Composer implements TerminalFrameProvider {
 	#lastClickSpans: ViewportClickSpan[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
+	/** Fullscreen main view: first visible body row, or `undefined` while following the tail. */
+	#fullscreenTop: number | undefined;
+	/** Last fullscreen frame's scrollable body and geometry, for scroll clamping, hit-testing, and copy. */
+	#fullscreenLayout: { body: readonly string[]; top: number; bodyRows: number } | undefined;
+	/** Drag selection in body-content coordinates; `focus` follows the pointer, both ends inclusive. */
+	#fullscreenSelection: { anchor: FullscreenPoint; focus: FullscreenPoint } | undefined;
+	/** Transient notice (e.g. "Copied …") on the body's last row; outranks the scroll indicator. */
+	#fullscreenNotice: { text: string; until: number } | undefined;
+	/** A left press landed in the fullscreen body and is extending a drag selection. */
+	#fullscreenDragging = false;
+	#fullscreenHandlers: FullscreenInputHandlers = {};
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -286,6 +340,7 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.setFrameProvider(this);
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
+		this.ui.setFullscreenMain(this.#preferences.fullscreen);
 
 		this.#editor = new CustomEditor(getEditorTheme());
 		this.editor.disableSubmit = true;
@@ -322,6 +377,9 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.addChild(this.editor);
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
+		// Registered before any host listener, so fullscreen scrolling and
+		// selection claim their input first; everything else passes through.
+		this.ui.addInputListener(data => this.#handleFullscreenInput(data));
 	}
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
@@ -344,48 +402,7 @@ export class Composer implements TerminalFrameProvider {
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
 		const afterRoots = roots.slice(transcriptIndex + 1);
-		const after: string[] = [];
-		const afterSpans: ViewportClickSpan[] = [];
-		for (const root of afterRoots) {
-			const start = after.length;
-			// Row targets usually nest one level down: chrome roots are plain
-			// containers (the HUD lives inside `subagentContainer`), and
-			// `Container.render` is a pure concatenation, so child spans tile
-			// the root span exactly. Render those children once and share the
-			// rows for composition and measurement — a second render per frame
-			// would duplicate render-time side effects (image placement
-			// registration). Roots with a custom render keep the composed
-			// output as the source of truth and measure up to the last target.
-			const plainContainer = root instanceof Container && root.render === Container.prototype.render;
-			const targets = root instanceof Container ? root.children : [root];
-			const resolves = targets.map(rowTargetCandidates);
-			const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
-			if (plainContainer) {
-				let offset = start;
-				for (let index = 0; index < targets.length; index++) {
-					const childLines = targets[index]!.render(width);
-					after.push(...childLines);
-					if (index > lastTarget) continue;
-					const resolve = resolves[index];
-					if (resolve !== undefined && childLines.length > 0) {
-						afterSpans.push({ start: offset, end: offset + childLines.length, candidates: resolve });
-					}
-					offset += childLines.length;
-				}
-				continue;
-			}
-			after.push(...root.render(width));
-			if (lastTarget === -1) continue;
-			let offset = start;
-			for (let index = 0; index <= lastTarget; index++) {
-				const childLines = targets[index] === root ? after.length - start : targets[index]!.render(width).length;
-				const resolve = resolves[index];
-				if (resolve !== undefined && childLines > 0) {
-					afterSpans.push({ start: offset, end: offset + childLines, candidates: resolve });
-				}
-				offset += childLines;
-			}
-		}
+		const { rows: after, spans: afterSpans } = this.#renderChromeRoots(afterRoots, width);
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -422,19 +439,8 @@ export class Composer implements TerminalFrameProvider {
 		const mutable = [...before, ...active, ...after].slice(drop);
 		const viewportLength = mutable.length;
 		const spans: ViewportClickSpan[] = [];
-		const shift = (span: ViewportClickSpan, base: number): void => {
-			const start = span.start + base;
-			const end = Math.min(span.end + base, viewportLength);
-			const clamped = Math.max(0, start);
-			if (end > clamped) {
-				// A clipped head must offset the callback: without the skew the
-				// first visible row would hit-test as span-local row 0.
-				const skew = clamped - start;
-				spans.push({ start: clamped, end, candidates: (local: number) => span.candidates(local + skew) });
-			}
-		};
-		for (const span of activeSpans) shift(span, before.length - drop);
-		for (const span of afterSpans) shift(span, before.length + active.length - drop);
+		for (const span of activeSpans) shiftClickSpan(span, before.length - drop, viewportLength, spans);
+		for (const span of afterSpans) shiftClickSpan(span, before.length + active.length - drop, viewportLength, spans);
 		this.#lastClickSpans = spans;
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
@@ -467,6 +473,322 @@ export class Composer implements TerminalFrameProvider {
 			return line;
 		});
 		return banded ? painted : viewport;
+	}
+
+	/**
+	 * Render the chrome below the transcript (live HUDs, editor, status) plus
+	 * the click spans of its row targets, in chrome-local rows.
+	 */
+	#renderChromeRoots(roots: readonly Component[], width: number): { rows: string[]; spans: ViewportClickSpan[] } {
+		const rows: string[] = [];
+		const spans: ViewportClickSpan[] = [];
+		for (const root of roots) {
+			const start = rows.length;
+			// Row targets usually nest one level down: chrome roots are plain
+			// containers (the HUD lives inside `subagentContainer`), and
+			// `Container.render` is a pure concatenation, so child spans tile
+			// the root span exactly. Render those children once and share the
+			// rows for composition and measurement — a second render per frame
+			// would duplicate render-time side effects (image placement
+			// registration). Roots with a custom render keep the composed
+			// output as the source of truth and measure up to the last target.
+			const plainContainer = root instanceof Container && root.render === Container.prototype.render;
+			const targets = root instanceof Container ? root.children : [root];
+			const resolves = targets.map(rowTargetCandidates);
+			const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
+			if (plainContainer) {
+				let offset = start;
+				for (let index = 0; index < targets.length; index++) {
+					const childLines = targets[index]!.render(width);
+					rows.push(...childLines);
+					if (index > lastTarget) continue;
+					const resolve = resolves[index];
+					if (resolve !== undefined && childLines.length > 0) {
+						spans.push({ start: offset, end: offset + childLines.length, candidates: resolve });
+					}
+					offset += childLines.length;
+				}
+				continue;
+			}
+			rows.push(...root.render(width));
+			if (lastTarget === -1) continue;
+			let offset = start;
+			for (let index = 0; index <= lastTarget; index++) {
+				const childLines = targets[index] === root ? rows.length - start : targets[index]!.render(width).length;
+				const resolve = resolves[index];
+				if (resolve !== undefined && childLines > 0) {
+					spans.push({ start: offset, end: offset + childLines, candidates: resolve });
+				}
+				offset += childLines;
+			}
+		}
+		return { rows, spans };
+	}
+
+	/**
+	 * Full-height frame for fullscreen main view (Claude Code's layout). The
+	 * chrome (live HUDs, editor, status) pins to the bottom; the rows above it
+	 * scroll over the header plus the whole transcript in place of native
+	 * history. Following the tail is the default: scrolling up detaches, and
+	 * reaching the bottom again re-attaches, so streaming never yanks a reader
+	 * back down and never strands one who returned to the tail.
+	 */
+	renderFullscreenFrame(viewport: ViewportSize): readonly string[] {
+		if (!this.#started || this.#stopped) return [];
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		const now = performance.now();
+		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
+		let body: string[];
+		let chrome: { rows: string[]; spans: ViewportClickSpan[] };
+		if (this.#runtimeMounted) {
+			const roots = [...this.#runtimeChildren, this.#statusHost];
+			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+			body = [
+				...this.#header.render(width),
+				...this.#renderRoots(roots.slice(0, Math.max(0, transcriptIndex)), width),
+			];
+			if (transcriptIndex >= 0) {
+				body.push(...(roots[transcriptIndex] as TranscriptContainer).renderAll(width, frame));
+			}
+			chrome = this.#renderChromeRoots(roots.slice(transcriptIndex + 1), width);
+		} else {
+			body = this.#renderRoots([this.#header, this.#bootstrapInputGap], width);
+			chrome = this.#renderChromeRoots([this.editor, this.#statusHost], width);
+		}
+		const bodyRows = Math.max(0, rows - chrome.rows.length);
+		const maxTop = Math.max(0, body.length - bodyRows);
+		let top = this.#fullscreenTop === undefined ? maxTop : Math.min(this.#fullscreenTop, maxTop);
+		if (top >= maxTop) {
+			top = maxTop;
+			this.#fullscreenTop = undefined;
+		}
+		this.#fullscreenLayout = { body, top, bodyRows };
+		const visible = body.slice(top, top + bodyRows);
+		this.#paintSelection(visible, top);
+		while (visible.length < bodyRows) visible.push("");
+		const notice = this.#fullscreenNotice;
+		if (notice !== undefined && this.#now() >= notice.until) this.#fullscreenNotice = undefined;
+		if (bodyRows > 0 && this.#fullscreenNotice !== undefined) {
+			visible[bodyRows - 1] = this.#rightAligned(this.#fullscreenNotice.text, width);
+		} else if (this.#fullscreenTop !== undefined && bodyRows > 0) {
+			const rowsBelow = body.length - (top + bodyRows);
+			visible[bodyRows - 1] = this.#rightAligned(
+				`↓ ${rowsBelow} more line${rowsBelow === 1 ? "" : "s"} · PgDn / ctrl+End`,
+				width,
+			);
+		}
+		// Chrome taller than the screen keeps its bottom (editor + status).
+		const lines = [...visible, ...chrome.rows].slice(-rows);
+		const spans: ViewportClickSpan[] = [];
+		for (const span of chrome.spans) shiftClickSpan(span, lines.length - chrome.rows.length, lines.length, spans);
+		this.#lastClickSpans = spans;
+		return this.#paintHoverBand(lines, spans);
+	}
+
+	/** An accent label right-aligned on its own row (scroll indicator, notices). */
+	#rightAligned(text: string, width: number): string {
+		const label = truncateToWidth(` ${text} `, width);
+		return " ".repeat(Math.max(0, width - visibleWidth(label))) + theme.fg("accent", label);
+	}
+
+	/**
+	 * Flash a short notice at the bottom of the fullscreen body, where the
+	 * reader is looking — a transcript status line would land below a
+	 * scrolled-up viewport, out of sight.
+	 */
+	showFullscreenNotice(text: string, durationMs = 2000): void {
+		this.#fullscreenNotice = { text, until: this.#now() + durationMs };
+		this.ui.requestRender();
+		setTimeout(() => this.ui.requestRender(), durationMs + 16).unref();
+	}
+
+	/** Reverse-video the selected cells of `visible`, whose first row is body row `top`. */
+	#paintSelection(visible: string[], top: number): void {
+		const range = this.#orderedSelection();
+		if (!range) return;
+		const { start, end } = range;
+		for (let index = 0; index < visible.length; index++) {
+			const row = top + index;
+			if (row < start.row || row > end.row) continue;
+			const line = visible[index]!;
+			const lineWidth = visibleWidth(line);
+			const from = row === start.row ? start.col : 0;
+			const to = Math.min(lineWidth, row === end.row ? end.col + 1 : lineWidth);
+			if (to <= from) continue;
+			const head = sliceWithWidth(line, 0, from).text;
+			const selected = sliceWithWidth(line, from, to - from).text.replace(SGR_RESET, `$&${SELECTION_ON}`);
+			const tail = sliceWithWidth(line, to, lineWidth - to).text;
+			visible[index] = `${head}${SELECTION_ON}${selected}${SELECTION_OFF}${tail}`;
+		}
+	}
+
+	#orderedSelection(): { start: FullscreenPoint; end: FullscreenPoint } | undefined {
+		const selection = this.#fullscreenSelection;
+		if (!selection) return undefined;
+		const { anchor, focus } = selection;
+		const forward = anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col);
+		return forward ? { start: anchor, end: focus } : { start: focus, end: anchor };
+	}
+
+	/** Whether the session paints in fullscreen main-view mode. */
+	isFullscreen(): boolean {
+		return this.ui.isFullscreenMain();
+	}
+
+	/** Whether the fullscreen body is detached from the tail (the user scrolled up). */
+	isFullscreenScrolled(): boolean {
+		return this.#fullscreenTop !== undefined;
+	}
+
+	/** Scroll the fullscreen body by `delta` rows; negative moves toward older output. */
+	scrollFullscreen(delta: number): void {
+		const layout = this.#fullscreenLayout;
+		const step = Math.trunc(delta);
+		if (!layout || step === 0) return;
+		const maxTop = Math.max(0, layout.body.length - layout.bodyRows);
+		const next = Math.max(0, Math.min(maxTop, (this.#fullscreenTop ?? maxTop) + step));
+		this.#fullscreenTop = next >= maxTop ? undefined : next;
+		this.ui.requestRender();
+	}
+
+	/** Page the fullscreen body by half a screen (Claude Code's PgUp/PgDn step). */
+	pageFullscreen(direction: -1 | 1): void {
+		this.scrollFullscreen(direction * Math.max(1, Math.floor((this.#fullscreenLayout?.bodyRows ?? 0) / 2)));
+	}
+
+	/** Jump to the oldest output, or re-attach to the tail. */
+	scrollFullscreenTo(edge: "top" | "bottom"): void {
+		const next = edge === "top" ? 0 : undefined;
+		if (next === this.#fullscreenTop) return;
+		this.#fullscreenTop = next;
+		this.ui.requestRender();
+	}
+
+	/** Body row under a screen cell, or `undefined` outside the scrollable body's content. */
+	#bodyPoint(screenRow: number, screenCol: number): FullscreenPoint | undefined {
+		const layout = this.#fullscreenLayout;
+		if (!layout || screenRow < 0 || screenRow >= layout.bodyRows) return undefined;
+		const row = layout.top + screenRow;
+		return row < layout.body.length ? { row, col: Math.max(0, screenCol) } : undefined;
+	}
+
+	/**
+	 * Start a drag selection at a screen cell (replacing any previous one).
+	 * Returns false when the cell is outside the scrollable body, e.g. on chrome.
+	 */
+	beginFullscreenSelection(screenRow: number, screenCol: number): boolean {
+		const point = this.#bodyPoint(screenRow, screenCol);
+		const had = this.#fullscreenSelection !== undefined;
+		this.#fullscreenSelection = point ? { anchor: point, focus: { ...point } } : undefined;
+		if (point || had) this.ui.requestRender();
+		return point !== undefined;
+	}
+
+	/** Extend the selection to a screen cell; dragging onto either edge scrolls a row that way. */
+	extendFullscreenSelection(screenRow: number, screenCol: number): void {
+		const selection = this.#fullscreenSelection;
+		const layout = this.#fullscreenLayout;
+		if (!selection || !layout || layout.bodyRows === 0 || layout.body.length === 0) return;
+		if (screenRow <= 0) this.scrollFullscreen(-1);
+		else if (screenRow >= layout.bodyRows - 1) this.scrollFullscreen(1);
+		const maxTop = Math.max(0, layout.body.length - layout.bodyRows);
+		const top = this.#fullscreenTop ?? maxTop;
+		const visibleRow = Math.max(0, Math.min(layout.bodyRows - 1, screenRow));
+		selection.focus = { row: Math.min(layout.body.length - 1, top + visibleRow), col: Math.max(0, screenCol) };
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Finish a drag: the selected plain text (styles stripped, trailing blanks
+	 * trimmed per row). A press released on its own cell is a click, not a
+	 * selection: it clears and returns `undefined`. The highlight otherwise
+	 * stays until the next press or {@link clearFullscreenSelection}.
+	 */
+	finishFullscreenSelection(): string | undefined {
+		const range = this.#orderedSelection();
+		const layout = this.#fullscreenLayout;
+		if (!range || !layout) return undefined;
+		if (range.start.row === range.end.row && range.start.col === range.end.col) {
+			this.clearFullscreenSelection();
+			return undefined;
+		}
+		const lines: string[] = [];
+		for (let row = range.start.row; row <= range.end.row && row < layout.body.length; row++) {
+			const plain = Bun.stripANSI(layout.body[row]!);
+			const lineWidth = visibleWidth(plain);
+			const from = row === range.start.row ? range.start.col : 0;
+			const to = row === range.end.row ? Math.min(lineWidth, range.end.col + 1) : lineWidth;
+			lines.push(to > from ? sliceWithWidth(plain, from, to - from).text.trimEnd() : "");
+		}
+		return lines.join("\n");
+	}
+
+	/** Drop the selection highlight. Returns whether one existed. */
+	clearFullscreenSelection(): boolean {
+		if (this.#fullscreenSelection === undefined) return false;
+		this.#fullscreenSelection = undefined;
+		this.ui.requestRender();
+		return true;
+	}
+
+	/** Install the host's clipboard and click-to-focus hooks for fullscreen input. */
+	setFullscreenInputHandlers(handlers: FullscreenInputHandlers): void {
+		this.#fullscreenHandlers = handlers;
+	}
+
+	/**
+	 * Fullscreen main-view input, Claude Code's model. With mouse capture on,
+	 * every SGR report is consumed so none reaches the editor as text: the
+	 * wheel scrolls, a left drag in the body selects and copies on release,
+	 * and the rest (chrome clicks, hover) goes to the host. Keys apply while
+	 * the editor has focus: PgUp/PgDn page by half a screen (taking them from
+	 * draft paging), ctrl+Home/ctrl+End jump to either end, Esc drops a
+	 * selection before the editor's interrupt handling sees it, and submitting
+	 * re-attaches a scrolled-up transcript so the sent message is in view.
+	 */
+	#handleFullscreenInput(data: string): { consume: true } | undefined {
+		if (!this.isFullscreen() || this.ui.hasOverlay()) {
+			this.#fullscreenDragging = false;
+			return undefined;
+		}
+		if (data.startsWith("\x1b[<")) {
+			const event = parseSgrMouse(data);
+			if (event) this.#handleFullscreenMouse(event);
+			return { consume: true };
+		}
+		if (this.ui.getFocused() !== this.editor) return undefined;
+		if (matchesKey(data, "pageUp")) this.pageFullscreen(-1);
+		else if (matchesKey(data, "pageDown")) this.pageFullscreen(1);
+		else if (matchesKey(data, "ctrl+home")) this.scrollFullscreenTo("top");
+		else if (matchesKey(data, "ctrl+end")) this.scrollFullscreenTo("bottom");
+		else if (matchesKey(data, "escape") && this.clearFullscreenSelection()) return { consume: true };
+		else {
+			if (getKeybindings().matches(data, "tui.input.submit")) this.scrollFullscreenTo("bottom");
+			return undefined;
+		}
+		return { consume: true };
+	}
+
+	#handleFullscreenMouse(event: SgrMouseEvent): void {
+		if (event.wheel !== null) {
+			this.scrollFullscreen(event.wheel * FULLSCREEN_WHEEL_ROWS);
+			return;
+		}
+		if (event.leftClick) {
+			this.#fullscreenDragging = this.beginFullscreenSelection(event.row, event.col);
+			if (this.#fullscreenDragging) return;
+		} else if (this.#fullscreenDragging && event.motion && (event.button & 3) === 0) {
+			// Bit 32 marks motion; the low bits are the held button (0 = left).
+			this.extendFullscreenSelection(event.row, event.col);
+			return;
+		} else if (this.#fullscreenDragging && event.release) {
+			this.#fullscreenDragging = false;
+			const text = this.finishFullscreenSelection();
+			if (text) this.#fullscreenHandlers.copy?.(text);
+			return;
+		}
+		this.#fullscreenHandlers.pointer?.(event);
 	}
 
 	/**
@@ -756,6 +1078,7 @@ export class Composer implements TerminalFrameProvider {
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
 		if (update.resizeScrollback !== undefined) this.ui.setResizeScrollback(update.resizeScrollback);
+		this.ui.setFullscreenMain(this.#preferences.fullscreen);
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
 		this.editor.setAutocompleteMaxVisible(this.#preferences.autocompleteMaxVisible);
 		this.editor.setSpellingFeatures({

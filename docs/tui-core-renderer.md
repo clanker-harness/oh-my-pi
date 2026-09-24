@@ -173,3 +173,34 @@ image environment settings.
    throwing in the render hot path.
 8. The renderer never probes terminal scroll position or forks history policy
    by terminal, multiplexer, or platform.
+
+## 8. Fullscreen main-view mode
+
+`TUI.setFullscreenMain(true)` (the coding agent's `tui.fullscreen` setting,
+default on; `PI_TUI_FULLSCREEN=0|1` overrides; tmux `-CC` control mode forces
+it off) runs the whole session the way Claude Code does: on the alternate
+buffer with SGR mouse tracking, so terminals and tmux hand wheel events to the
+app instead of scrolling their own history.
+
+- The provider's `renderFullscreenFrame(viewport)` returns exactly
+  `viewport.rows` rows; it becomes the base of `#renderAltFrame`, and overlays
+  composite over it exactly as they do over the blank modal base. A fullscreen
+  overlay still paints over a blank base.
+- No `HistoryBatch` is ever offered or written, so invariants 1–5 hold
+  vacuously: native history is untouched for the life of the mode, and `stop()`
+  skips the pre-stop history flush (quit, `$EDITOR`, and suspend never dump the
+  transcript into the shell).
+- `Composer` scrolls the header plus the full transcript
+  (`TranscriptContainer.renderAll`) above the pinned chrome. It follows the
+  tail by default; scrolling up detaches and holds position while output
+  streams below, and returning to the bottom re-attaches. Wheel (3 rows),
+  PgUp/PgDn (half the body), ctrl+Home/ctrl+End, and left-drag selection are
+  handled by a composer input listener registered before any host listener.
+  The host supplies clipboard and click-to-focus hooks via
+  `setFullscreenInputHandlers`.
+- Alt frames are diffed per row, so a streaming reply rewrites only the rows
+  that changed; forced repaints and image rows rewrite the whole frame. The
+  hardware cursor follows the frame's `CURSOR_MARKER` inside the same
+  synchronized write.
+- Leaving the mode at runtime requests a `clearScrollback` render: the alt exit
+  fuses with a complete replay into the normal buffer.

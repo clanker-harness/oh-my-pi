@@ -39,6 +39,7 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
+import { isTmuxControlMode } from "./tmux";
 import {
 	Ellipsis,
 	extractSegments,
@@ -108,6 +109,20 @@ function resizeInPlaceOverride(): boolean | null {
 	if (override === "1" || override === "true") return true;
 	if (override === "0" || override === "false") return false;
 	return null;
+}
+
+/**
+ * `PI_TUI_FULLSCREEN=1|true` forces fullscreen main-view mode on and `0|false`
+ * forces it off, over the preference. Unset defers to the preference, except
+ * under tmux control mode (iTerm2 `tmux -CC`), where the alternate screen plus
+ * mouse tracking corrupts the integration's terminal state and the wheel is
+ * dead — Claude Code auto-disables its fullscreen mode there for the same reason.
+ */
+function resolveFullscreenMain(preferred: boolean): boolean {
+	const override = Bun.env.PI_TUI_FULLSCREEN;
+	if (override === "1" || override === "true") return true;
+	if (override === "0" || override === "false") return false;
+	return preferred && !isTmuxControlMode();
 }
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
@@ -179,6 +194,13 @@ export interface TerminalFrameProvider {
 	beginHistoryReplay?(): void;
 	/** Force every currently eligible finalized prefix to retire before stop. */
 	beginHistoryFlush?(): void;
+	/**
+	 * Exactly `viewport.rows` rows for fullscreen main-view mode
+	 * ({@link TUI.setFullscreenMain}). The whole session paints on the
+	 * alternate buffer from this frame and nothing retires to native history,
+	 * so the provider owns scrolling. May contain {@link CURSOR_MARKER}.
+	 */
+	renderFullscreenFrame?(viewport: ViewportSize): readonly string[];
 }
 
 export interface TUIStartOptions {
@@ -888,6 +910,15 @@ export class TUI extends Container {
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
+	/**
+	 * Fullscreen main-view mode (resolved: preference, env override, tmux -CC).
+	 * While on and the provider implements `renderFullscreenFrame`, the session
+	 * itself lives on the alternate buffer with mouse capture, overlays composite
+	 * over its frame, and nothing retires to native history.
+	 */
+	#fullscreenMain = false;
+	/** Last hardware cursor written on the alt buffer; `null` = hidden. */
+	#altCursor: { row: number; col: number } | null = null;
 	#altPreviousLines: string[] = [];
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
@@ -1194,6 +1225,25 @@ export class TUI extends Container {
 	 */
 	setInlineMouseTrackingProvider(provider: (() => boolean) | undefined): void {
 		this.#inlineMouseProvider = provider;
+	}
+
+	/**
+	 * Enable fullscreen main-view mode (Claude Code's no-flicker layout). The
+	 * preference is resolved against `PI_TUI_FULLSCREEN` and tmux control mode.
+	 * Leaving the mode replays the transcript into the normal buffer, which
+	 * still holds whatever it showed before the session went fullscreen.
+	 */
+	setFullscreenMain(preferred: boolean): void {
+		const next = resolveFullscreenMain(preferred);
+		if (next === this.#fullscreenMain) return;
+		this.#fullscreenMain = next;
+		if (!this.#hasEverRendered) return;
+		this.requestRender(true, next ? undefined : { clearScrollback: true });
+	}
+
+	/** Whether the session is painting in fullscreen main-view mode. */
+	isFullscreenMain(): boolean {
+		return this.#fullscreenMain && this.#frameProvider?.renderFullscreenFrame !== undefined;
 	}
 
 	/** Transition mouse reporting, emitting only the sequences a change needs. */
@@ -2015,7 +2065,11 @@ export class TUI extends Container {
 		// erase native history and re-stream the whole transcript at quit; drop
 		// the latch so the flush below writes only un-retired rows.
 		this.#clearScrollbackOnNextRender = false;
-		this.#flushHistoryBeforeStop();
+		// Fullscreen main view never retires rows, so a flush would dump the
+		// whole transcript onto the normal buffer at every quit, `$EDITOR`
+		// handoff, and suspend. The session lives on the alternate buffer only,
+		// like any fullscreen program.
+		if (!this.isFullscreenMain()) this.#flushHistoryBeforeStop();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -3016,17 +3070,22 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
-		// requests it, borrow the terminal's alternate buffer and paint only the
-		// modal there; the normal screen and all accounting stay untouched.
+		// Alt-screen short-circuit. Either the topmost visible overlay requests
+		// it (paint only the modal there; the normal screen and its accounting
+		// stay untouched), or fullscreen main-view mode keeps the whole session
+		// on the alternate buffer, with overlays composited over its frame.
 		const topOverlay = this.#getTopmostVisibleOverlay();
-		const wantAlt = topOverlay?.options?.fullscreen === true;
+		const fullscreenMain = this.isFullscreenMain();
+		const overlayFullscreen = topOverlay?.options?.fullscreen === true;
+		const wantAlt = fullscreenMain || overlayFullscreen;
 		const wantMouse: MouseTrackingState =
 			topOverlay === undefined
-				? this.#inlineMouseProvider?.() === true
-					? "inline"
-					: "off"
-				: wantAlt && topOverlay.options?.mouseTracking !== false
+				? fullscreenMain
+					? "full"
+					: this.#inlineMouseProvider?.() === true
+						? "inline"
+						: "off"
+				: overlayFullscreen && topOverlay.options?.mouseTracking !== false
 					? "full"
 					: "off";
 		if (wantAlt && !this.#altActive) {
@@ -3042,6 +3101,7 @@ export class TUI extends Container {
 			this.terminal.hideCursor();
 			this.#forgetHardwareCursorState();
 			this.#recordHardwareCursorHidden();
+			this.#altCursor = null;
 			this.#altActive = true;
 			this.#altPreviousLines = [];
 			this.#altPreparedRows = [];
@@ -3069,6 +3129,7 @@ export class TUI extends Container {
 				setAltScreenActive(false);
 			}
 			this.#forgetHardwareCursorState();
+			this.#altCursor = null;
 			this.#altActive = false;
 			this.#mouseTracking = wantMouse;
 			this.#altPreviousLines = [];
@@ -3530,30 +3591,50 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Compose and paint a single fullscreen overlay frame on the alt buffer.
-	 * Cursor markers are stripped (the modal draws its own in-band caret and
-	 * keeps the hardware cursor hidden), and only the modal is composited over a
-	 * blank base — the transcript is never touched while the alt buffer is up.
+	 * Compose and paint one alt-buffer frame. A fullscreen overlay paints over a
+	 * blank base with cursor markers stripped (the modal draws its own in-band
+	 * caret and keeps the hardware cursor hidden). In fullscreen main-view mode
+	 * the provider's full-height session frame is the base, overlays composite
+	 * over it, and the hardware cursor follows the frame's cursor marker.
 	 */
 	#renderAltFrame(width: number, height: number): void {
-		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
-		const base: string[] = new Array(Math.max(0, height)).fill("");
+		const provider = this.#frameProvider;
+		const mainBase =
+			this.isFullscreenMain() && this.#getTopmostVisibleOverlay()?.options?.fullscreen !== true && provider;
 		let lines: string[];
 		do {
 			this.#imageBudget.beginPass(false, true);
+			// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
+			const base: string[] = new Array(Math.max(0, height)).fill("");
+			if (mainBase) {
+				const frame = mainBase.renderFullscreenFrame?.({ columns: width, rows: height }) ?? [];
+				for (let row = 0; row < base.length && row < frame.length; row++) base[row] = frame[row]!;
+			}
 			lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		} while (this.#imageBudget.endPass());
-		this.#extractCursorMarkers(lines);
+		const markers = this.#extractCursorMarkers(lines);
 		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height);
-		this.#emitAltFrame(prepared, width, height, true);
+		const target = mainBase ? this.#targetHardwareCursorState(markers[0] ?? null, height) : null;
+		this.#emitAltFrame(prepared, width, height, true, target?.visible ? target : null);
 	}
 
 	/**
-	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
-	 * brackets, a cursor home, and per-row rewrites — never ED3 or any
-	 * native-scrollback byte. The hardware cursor stays hidden here.
+	 * Paint an alt-buffer frame: sync-output brackets, cursor addressing, and
+	 * per-row rewrites — never ED3 or any native-scrollback byte. Only changed
+	 * rows are rewritten (fullscreen main view repaints on every streamed
+	 * token); forced repaints and image rows rewrite everything.
+	 *
+	 * `cursor`: `undefined` leaves the hardware cursor alone (transient resize
+	 * frames), `null` keeps it hidden (fullscreen overlays draw in-band carets),
+	 * and a position shows it there (fullscreen main view's editor).
 	 */
-	#emitAltFrame(prepared: PreparedLines, width: number, height: number, notifyPaint: boolean): void {
+	#emitAltFrame(
+		prepared: PreparedLines,
+		width: number,
+		height: number,
+		notifyPaint: boolean,
+		cursor?: { row: number; col: number } | null,
+	): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
 		// screen's own placements behind it are not treated as retired.
 		this.#imageBudget.limitResidentImages();
@@ -3573,14 +3654,15 @@ export class TUI extends Container {
 			for (const seq of imageTransmits) transmitBuffer += seq;
 			this.terminal.write(transmitBuffer);
 		}
-		// Skip an identical repaint (the modal is mostly static between
-		// keystrokes) — unless a forced repaint (resetDisplay,
-		// requestRender(true)) is pending: the redraw gesture must repair a
-		// corrupted modal even when our cached frame is byte-identical.
+		// Skip unchanged rows (the modal is mostly static between keystrokes) —
+		// unless a forced repaint (resetDisplay, requestRender(true)) is pending:
+		// the redraw gesture must repair a corrupted frame even when our cached
+		// rows are byte-identical.
 		const force = this.#forceViewportRepaintOnNextRender;
 		this.#forceViewportRepaintOnNextRender = false;
+		let changed: number[] | undefined;
 		if (!force && this.#altPreviousLines.length === height) {
-			let same = true;
+			changed = [];
 			for (let r = 0; r < height; r++) {
 				const previous = this.#altPreparedRows[r];
 				const current = prepared.rows[r]!;
@@ -3591,28 +3673,61 @@ export class TUI extends Container {
 					previous.widthEpoch !== current.widthEpoch ||
 					previous.imageProtocol !== current.imageProtocol
 				) {
-					same = false;
-					break;
+					if (current.isImage || previous?.isImage) {
+						changed = undefined;
+						break;
+					}
+					changed.push(r);
 				}
 			}
-			if (same) {
-				this.#altPreviousLines = prepared.lines;
-				this.#altPreparedRows = prepared.rows;
-				return;
+		}
+		const cursorSequence =
+			cursor === undefined
+				? ""
+				: cursor === null
+					? "\x1b[?25l"
+					: `\x1b[${cursor.row + 1};${cursor.col + 1}H\x1b[?25h`;
+		const cursorChanged =
+			cursor !== undefined &&
+			(cursor === null
+				? this.#altCursor !== null
+				: this.#altCursor === null || this.#altCursor.row !== cursor.row || this.#altCursor.col !== cursor.col);
+		if (cursor !== undefined) this.#altCursor = cursor === null ? null : { row: cursor.row, col: cursor.col };
+		if (changed?.length === 0) {
+			this.#altPreviousLines = prepared.lines;
+			this.#altPreparedRows = prepared.rows;
+			if (cursorChanged) this.terminal.write(cursorSequence);
+			return;
+		}
+		let buffer = this.#paintBeginSequence;
+		if (changed === undefined) {
+			buffer += "\x1b[H";
+			for (let r = 0; r < height; r++) {
+				if (r > 0) buffer += "\n";
+				buffer += this.#lineRewriteSequence(
+					prepared.rows[r]!,
+					width,
+					r,
+					-1,
+					-1,
+					this.#osc66SpacerGlyphWidth(prepared.lines, r),
+				);
+			}
+		} else {
+			for (const r of changed) {
+				buffer += `\x1b[${r + 1};1H${this.#lineRewriteSequence(
+					prepared.rows[r]!,
+					width,
+					r,
+					-1,
+					-1,
+					this.#osc66SpacerGlyphWidth(prepared.lines, r),
+				)}`;
 			}
 		}
-		let buffer = `${this.#paintBeginSequence}\x1b[H`;
-		for (let r = 0; r < height; r++) {
-			if (r > 0) buffer += "\n";
-			buffer += this.#lineRewriteSequence(
-				prepared.rows[r]!,
-				width,
-				r,
-				-1,
-				-1,
-				this.#osc66SpacerGlyphWidth(prepared.lines, r),
-			);
-		}
+		// Rewrites move the physical cursor, so a shown cursor is re-placed on
+		// every paint, inside the same synchronized write.
+		buffer += cursorSequence;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = prepared.lines;

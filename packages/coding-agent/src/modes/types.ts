@@ -34,6 +34,7 @@ import type { TokenRateMeter } from "../utils/token-rate";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
@@ -106,6 +107,8 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
+	/** Frame owner: fullscreen main-view scrolling and drag selection live here. */
+	readonly composer: Composer;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;

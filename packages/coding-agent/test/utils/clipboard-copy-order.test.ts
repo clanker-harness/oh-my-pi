@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Buffer } from "node:buffer";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as natives from "@oh-my-pi/pi-natives/clipboard";
@@ -38,9 +38,19 @@ type SpawnCall = { cmd: string[]; stdin: string; env: Record<string, string | un
  * whatever the developer has on the pasteboard.
  */
 describe("copyToClipboard local backend order", () => {
+	// The tmux-buffer step keys off TMUX, which leaks in from whatever shell runs the suite.
+	const inheritedEnv = { TMUX: process.env.TMUX, LC_TERMINAL: process.env.LC_TERMINAL };
+	beforeEach(() => {
+		delete process.env.TMUX;
+		delete process.env.LC_TERMINAL;
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
 		if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+		for (const [key, value] of Object.entries(inheritedEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
 	});
 
 	function captureSpawns(calls: SpawnCall[], onPbcopy: () => Bun.Subprocess) {
@@ -57,6 +67,7 @@ describe("copyToClipboard local backend order", () => {
 				env: options?.env,
 			});
 			if (cmd[0] === "pbcopy") return onPbcopy();
+			if (cmd[0] === "tmux") return fakeProcess(0);
 			throw new Error(`unexpected spawn: ${cmd.join(" ")}`);
 		});
 	}
@@ -72,6 +83,21 @@ describe("copyToClipboard local backend order", () => {
 		expect(calls.map(call => call.cmd[0])).toEqual(["pbcopy"]);
 		expect(calls[0]?.stdin).toBe("omp-clipboard-order-probe");
 		expect(nativeCopy).not.toHaveBeenCalled();
+	});
+
+	it("inside tmux also loads a tmux buffer that tmux forwards to the outer clipboard", async () => {
+		// tmux drops an application's OSC 52 under its default `set-clipboard
+		// external`; the buffer is what reaches the outer terminal over SSH.
+		setPlatform("darwin");
+		process.env.TMUX = "/tmp/tmux-501/default,1,0";
+		vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const calls: SpawnCall[] = [];
+		captureSpawns(calls, () => fakeProcess(0));
+
+		await copyToClipboard("omp-tmux-buffer-probe");
+
+		expect(calls.map(call => call.cmd)).toEqual([["tmux", "load-buffer", "-w", "-"], ["pbcopy"]]);
+		expect(calls[0]?.stdin).toBe("omp-tmux-buffer-probe");
 	});
 
 	it.each([

@@ -42,7 +42,8 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await initTheme();
-		settings = await Settings.init({ inMemory: true });
+		// These cases pin the inline (normal-buffer) startup paint: native-history clears only exist there.
+		settings = await Settings.init({ inMemory: true, overrides: { "tui.fullscreen": false } });
 		config = {
 			quiet: settings.get("startup.quiet"),
 			composerShape: settings.get("composer.shape") ?? "box",
@@ -54,6 +55,7 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			fullscreen: settings.get("tui.fullscreen"),
 		};
 	});
 

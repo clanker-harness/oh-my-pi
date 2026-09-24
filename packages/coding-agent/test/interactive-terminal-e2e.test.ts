@@ -36,7 +36,8 @@ describe("libkitty end-to-end", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-libkitty-e2e-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		// Inline (normal-buffer) behavior under test; fullscreen main view has no native scrollback.
+		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "tui.fullscreen": false } });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");

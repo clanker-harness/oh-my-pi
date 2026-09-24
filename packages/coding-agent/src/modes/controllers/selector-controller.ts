@@ -613,6 +613,9 @@ export class SelectorController {
 			case "composer.shape":
 				this.ctx.syncComposerShape();
 				break;
+			case "tui.fullscreen":
+				this.ctx.composer.setPreferences({ fullscreen: value as boolean });
+				break;
 			case "advisor.enabled":
 				this.ctx.session.setAdvisorEnabled(value as boolean);
 				this.ctx.statusLine.invalidate();

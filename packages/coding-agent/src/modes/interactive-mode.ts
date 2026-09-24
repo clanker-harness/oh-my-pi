@@ -1156,6 +1156,37 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Claude Code's one-time tmux hint. tmux only forwards the wheel to an app
+	 * that requested mouse reporting when its own `mouse` option is on, and
+	 * that option is session-wide, so omp leaves it alone (as vim/less do) and
+	 * says so instead. `-A` reads the effective value: `set -g mouse on` in
+	 * ~/.tmux.conf is global, and plain `show -v` returns empty for it.
+	 */
+	async #maybeShowTmuxMouseHint(): Promise<void> {
+		if (!Bun.env.TMUX || !this.composer.isFullscreen()) return;
+		try {
+			const child = Bun.spawn(["tmux", "show", "-Av", "mouse"], { stdout: "pipe", stderr: "ignore" });
+			const [value, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+			if (code !== 0 || value.trim() === "on") return;
+		} catch {
+			return;
+		}
+		this.showStatus(
+			"tmux mouse is off · scroll with PgUp/PgDn · add 'set -g mouse on' to ~/.tmux.conf for wheel scroll",
+		);
+	}
+
+	/** Copy a fullscreen drag selection, confirming where the reader is looking. */
+	async #copyFullscreenSelection(text: string): Promise<void> {
+		try {
+			await copyToClipboard(text);
+			this.composer.showFullscreenNotice(`Copied ${text.length} character${text.length === 1 ? "" : "s"}`);
+		} catch (error) {
+			this.composer.showFullscreenNotice(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	resolveViewportClickCandidates(index: number): string[] {
 		return this.composer.viewportClickCandidates(index);
 	}
@@ -1267,6 +1298,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			fullscreen: settings.get("tui.fullscreen"),
 		};
 		const wasStarted = composer?.started ?? false;
 		setMagicKeywords(MAGIC_KEYWORDS);
@@ -1483,6 +1515,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
+		this.composer.setFullscreenInputHandlers({
+			copy: text => void this.#copyFullscreenSelection(text),
+			pointer: event => this.#inputController.handleFullscreenPointer(event),
+		});
 		this.collabController = new CollabController(this);
 		this.session.setTitleGenerationStart?.(() => this.#inputController.notifyTitleGenerationStart());
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
@@ -1771,6 +1807,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
 		// TUI's multiplexer, output-backlog, and image safety gates.
 		this.ui.renderNow();
+		void this.#maybeShowTmuxMouseHint();
 
 		const streamCwd = this.sessionManager.getCwd();
 		this.#streamPublisher =

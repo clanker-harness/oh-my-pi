@@ -148,6 +148,20 @@ export async function copyToClipboard(text: string): Promise<void> {
 		await previousWrite;
 	}
 
+	// Inside tmux, an application's OSC 52 is dropped under the default
+	// `set-clipboard external`, so over SSH nothing above reaches the outer
+	// terminal. Loading a tmux buffer makes `prefix + ]` paste it, and `-w`
+	// has tmux itself forward it to the outer clipboard. iTerm2 prompts for
+	// clipboard access on every tmux-forwarded write, so it gets no `-w`.
+	if (process.env.TMUX) {
+		const forward = process.env.LC_TERMINAL === "iTerm2" ? [] : ["-w"];
+		try {
+			await spawnCapture(["tmux", "load-buffer", ...forward, "-"], { input: text, timeoutMs: 2000 });
+		} catch {
+			// Best effort: the native copy below still covers local sessions.
+		}
+	}
+
 	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {

@@ -6,6 +6,18 @@ export function isInsideTmux(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.TMUX);
 }
 
+/**
+ * Whether this looks like iTerm2's tmux integration (`tmux -CC`). A plain tmux
+ * client sets `TERM` to `screen*`/`tmux*` and `TERM_PROGRAM=tmux`; control
+ * mode leaves iTerm2's own values in place, so tmux + an iTerm2 `TERM_PROGRAM`
+ * + a non-tmux `TERM` identifies it without spawning `tmux display-message`.
+ */
+export function isTmuxControlMode(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	if (!env.TMUX || env.TERM_PROGRAM !== "iTerm.app") return false;
+	const term = env.TERM ?? "";
+	return !term.startsWith("screen") && !term.startsWith("tmux");
+}
+
 /** Wrap a control sequence in tmux's DCS passthrough envelope. */
 export function wrapTmuxPassthrough(payload: string): string {
 	return `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;

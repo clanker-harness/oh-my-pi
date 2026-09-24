@@ -267,6 +267,8 @@ describe("Composer prepaint", () => {
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			// These cases pin the inline (normal-buffer) startup paint.
+			fullscreen: false,
 		};
 	});
 
@@ -748,6 +750,7 @@ describe("Composer prepaint", () => {
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			fullscreen: false,
 			theme: {},
 		});
 		await terminal.waitForRender();
