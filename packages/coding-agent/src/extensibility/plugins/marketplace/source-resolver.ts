@@ -89,14 +89,14 @@ export async function validatePluginSource(
 	}
 }
 
-// ── Relative string source ("./plugins/foo") ────────────────────────
+// ── Relative string source ("./plugins/foo", or "." for the marketplace root) ──
 
 function resolveRelativeSourcePath(
 	source: string,
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
 ): string {
-	if (!source.startsWith("./")) {
-		throw new Error(`Relative plugin source paths must start with "./" — got: "${source}"`);
+	if (source !== "." && !source.startsWith("./")) {
+		throw new Error(`Relative plugin source paths must be "." or start with "./" — got: "${source}"`);
 	}
 	if (!context.marketplaceClonePath) {
 		throw new Error(`Cannot resolve relative source "${source}": marketplaceClonePath is required`);

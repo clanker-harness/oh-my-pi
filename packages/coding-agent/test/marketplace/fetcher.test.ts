@@ -89,6 +89,21 @@ describe("parseMarketplaceCatalog", () => {
 		expect(catalog.plugins[0].name).toBe("hello-plugin");
 	});
 
+	it('keeps a plugin whose source is "." (the repository is the plugin)', () => {
+		// browser-use/browser-harness ships this shape; Claude Code installs it.
+		// A "./"-only check used to drop the entry silently, so install reported
+		// the plugin as missing from its own marketplace.
+		const catalog = parseMarketplaceCatalog(
+			JSON.stringify({
+				name: "browser-harness",
+				owner: { name: "Browser Use" },
+				plugins: [{ name: "browser-harness", source: "." }],
+			}),
+			"/fake/marketplace.json",
+		);
+		expect(catalog.plugins.map(plugin => [plugin.name, plugin.source])).toEqual([["browser-harness", "."]]);
+	});
+
 	it("parses a catalog whose name has uppercase letters (#10827)", () => {
 		const catalog = parseMarketplaceCatalog(
 			JSON.stringify({

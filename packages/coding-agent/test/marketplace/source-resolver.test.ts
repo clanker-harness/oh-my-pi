@@ -35,6 +35,11 @@ describe("resolvePluginSource", () => {
 		expect(resolved.tempCloneRoot).toBeUndefined();
 	});
 
+	it('resolves "." to the marketplace root itself', async () => {
+		const resolved = await resolvePluginSource(makeEntry("."), { marketplaceClonePath: FIXTURE_DIR, tmpDir });
+		expect(resolved.dir).toBe(FIXTURE_DIR);
+	});
+
 	it("validates relative sources without mutating or cloning", async () => {
 		await expect(
 			validatePluginSource(makeEntry("./plugins/hello-plugin"), { marketplaceClonePath: FIXTURE_DIR }),

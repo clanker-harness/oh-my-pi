@@ -150,9 +150,15 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 				`plugins[${i}].source`,
 				filePath,
 			);
-			// String sources must be relative paths starting with "./"
+			// String sources are paths relative to the marketplace root: "./dir",
+			// or "." when the repository is itself the plugin (Claude Code accepts
+			// both; browser-use/browser-harness ships `"source": "."`).
 			if (typeof p.source === "string") {
-				assertField((p.source as string).startsWith("./"), `plugins[${i}].source (must start with "./")`, filePath);
+				assertField(
+					p.source === "." || p.source.startsWith("./"),
+					`plugins[${i}].source (must be "." or start with "./")`,
+					filePath,
+				);
 			}
 			// Validate required fields for typed source variants
 			if (typeof p.source === "object" && p.source !== null) {
