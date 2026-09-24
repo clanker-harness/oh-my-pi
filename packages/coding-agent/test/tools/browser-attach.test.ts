@@ -21,7 +21,7 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, shouldEmulateFocus } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
@@ -170,6 +170,16 @@ describe("pickElectronTarget", () => {
 	test("preserves connected-browser focus only for automatic target selection", () => {
 		expect(shouldPreserveConnectedBrowserFocus()).toBe(true);
 		expect(shouldPreserveConnectedBrowserFocus("example.com")).toBe(false);
+	});
+
+	test("emulates focus for targeted relay tabs, never the user's visible tab", () => {
+		// A targeted relay adoption is the agent's own tab in the relay's unfocused
+		// automation window: without focus emulation Chrome drops its real input.
+		expect(shouldEmulateFocus("relay", true)).toBe(true);
+		// Target-less relay adoption is the user's visible tab: leave it alone.
+		expect(shouldEmulateFocus("relay", false)).toBe(false);
+		expect(shouldEmulateFocus("headless", false)).toBe(true);
+		expect(shouldEmulateFocus("connected", true)).toBe(false);
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {

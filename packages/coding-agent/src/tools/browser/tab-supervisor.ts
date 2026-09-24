@@ -1311,7 +1311,21 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		waitUntil: opts.waitUntil,
 		timeoutMs: opts.timeoutMs,
 		activateForScreenshot,
+		emulateFocus: shouldEmulateFocus(browser.kind.kind, activateForScreenshot),
 	};
+}
+
+/**
+ * Whether a tab's worker should emulate a focused page. Headless tabs always do.
+ * A relay tab adopted by an explicit target is the agent's own background tab,
+ * typically in the relay's unfocused automation window, which Chrome marks
+ * hidden: pages load and DOM reads work, but real clicks and keystrokes are
+ * dropped (Google Docs menus, search boxes). Focus emulation keeps it
+ * interactive without raising a window. A target-less relay adoption is the
+ * user's visible tab (`activateForScreenshot` false): left untouched.
+ */
+export function shouldEmulateFocus(kind: BrowserKindTag, activateForScreenshot: boolean | undefined): boolean {
+	return kind === "headless" || (kind === "relay" && activateForScreenshot === true);
 }
 
 function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
@@ -1416,7 +1430,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: true,
-		emulateFocus: tab.kindTag === "headless",
+		emulateFocus: shouldEmulateFocus(tab.kindTag, tab.activateForScreenshot),
 		timeoutMs,
 		activateForScreenshot: tab.activateForScreenshot,
 	};
