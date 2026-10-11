@@ -36,7 +36,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		await fsp.rm(testAgentDir, { recursive: true, force: true });
 	});
 
-	it("honors a same-terminal lazy fresh-session breadcrumb when no output was produced", async () => {
+	it("resumes the folder's latest transcript when this terminal's last session never got a reply", async () => {
 		const old = SessionManager.create(cwd);
 		old.appendMessage({ role: "user", content: "older work", timestamp: 1 });
 		old.appendMessage(makeAssistantMessage());
@@ -45,25 +45,48 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		if (!oldFile) throw new Error("Expected persisted old session file");
 		await old.close();
 
-		// Initial session creation remains lazy. Its terminal-scoped breadcrumb
-		// must keep same-terminal auto-resume from selecting the older file.
-		const fresh = SessionManager.create(cwd);
-		const freshFile = fresh.getSessionFile();
-		if (!freshFile) throw new Error("Expected a fresh session file path");
-		expect(fs.existsSync(freshFile)).toBe(false);
-		await fresh.close();
+		// Open omp and quit before sending anything: the lazy session never
+		// materializes, but it is still this terminal's last session.
+		const unanswered = SessionManager.create(cwd);
+		const unansweredFile = unanswered.getSessionFile();
+		if (!unansweredFile) throw new Error("Expected an unanswered session file path");
+		expect(fs.existsSync(unansweredFile)).toBe(false);
+		await unanswered.close();
 
 		const relaunched = await SessionManager.continueRecent(cwd);
 		try {
-			expect(relaunched.getEntries()).toHaveLength(0);
-			expect(path.resolve(relaunched.getSessionFile() ?? "")).not.toBe(path.resolve(freshFile));
-			expect(path.resolve(relaunched.getSessionFile() ?? "")).not.toBe(path.resolve(oldFile));
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(oldFile));
+			expect(JSON.stringify(relaunched.getEntries())).toContain("older work");
 		} finally {
 			await relaunched.close();
 		}
 	});
 
-	it("skips an explicit /new boundary on a different terminal and continues the latest non-empty session", async () => {
+	it("an unanswered session in another folder does not block -c in this folder", async () => {
+		const project = SessionManager.create(cwd);
+		project.appendMessage({ role: "user", content: "project work", timestamp: 1 });
+		project.appendMessage(makeAssistantMessage());
+		await project.flush();
+		const projectFile = project.getSessionFile();
+		if (!projectFile) throw new Error("Expected persisted project session file");
+		await project.close();
+
+		// Same terminal: open omp one folder up, quit without a turn, then
+		// `cd project && omp -c`.
+		const parent = path.dirname(cwd);
+		const stray = SessionManager.create(parent);
+		await stray.close();
+
+		const relaunched = await SessionManager.continueRecent(cwd);
+		try {
+			expect(path.resolve(relaunched.getSessionFile() ?? "")).toBe(path.resolve(projectFile));
+			expect(JSON.stringify(relaunched.getEntries())).toContain("project work");
+		} finally {
+			await relaunched.close();
+		}
+	});
+
+	it("skips an unanswered /new boundary and continues the latest non-empty session", async () => {
 		const old = SessionManager.create(cwd);
 		old.appendMessage({ role: "user", content: "pre-new work", timestamp: 1 });
 		old.appendMessage(makeAssistantMessage());
@@ -84,10 +107,8 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		fs.utimesSync(oldFile, tiedMtime, tiedMtime);
 		fs.utimesSync(freshFile, tiedMtime, tiedMtime);
 
-		// Closing a terminal tab/window changes its TTY identity, so the next
-		// process has no breadcrumb pointing at the empty boundary: -c skips
-		// the 0-turn stub and continues the latest non-empty transcript.
-		process.env.TMUX_PANE = "%new-boundary-relaunched-terminal";
+		// Same terminal: the breadcrumb points at the 0-turn /new boundary, which
+		// must not shadow the latest non-empty transcript.
 		const relaunched = await SessionManager.continueRecent(cwd);
 		try {
 			expect(JSON.stringify(relaunched.getEntries())).toContain("pre-new work");
