@@ -698,6 +698,16 @@ export async function findMostRecentNonEmptySession(
 	return sessions.find(session => !isEmptySession(session))?.path ?? null;
 }
 
+/** True when `file` holds resumable content (not a missing file or 0-turn empty stub). */
+export async function isResumableSessionFile(
+	file: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<boolean> {
+	// Status on, matching findMostRecentNonEmptySession's answered-ness check.
+	const session = await scanSessionFile(file, storage, true);
+	return session !== undefined && !isEmptySession(session);
+}
+
 /** Exported for testing */
 export async function findMostRecentSession(
 	sessionDir: string,

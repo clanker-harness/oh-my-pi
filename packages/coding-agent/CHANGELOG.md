@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `--continue` now always resumes the current folder's latest session that has a reply. A session opened and quit before any reply — in this folder or another — no longer makes `-c` start an empty session, including after a reboot reuses terminal numbers.
+
 ## [18.3.0] - 2026-09-24
 
 ### Breaking Changes

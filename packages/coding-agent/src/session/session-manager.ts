@@ -72,6 +72,7 @@ import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
 	isEmptySession,
+	isResumableSessionFile,
 	listAllSessions,
 	listSessions,
 	type SessionInfo,
@@ -800,13 +801,6 @@ export class SessionManager {
 	#inMemoryArtifactCounter = 0;
 
 	#suppressBreadcrumb = false;
-	/**
-	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
-	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
-	 * the session materializes, so a materialized-then-deleted session still falls
-	 * back to the most-recent session instead of being treated as a fresh crumb.
-	 */
-	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
@@ -820,18 +814,8 @@ export class SessionManager {
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
 	}
 
-	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
-		this.#breadcrumbFresh = fresh;
-		if (!this.#suppressBreadcrumb) writeTerminalBreadcrumb(cwd, sessionFile, fresh);
-	}
-
-	/**
-	 * Re-stamp a fresh-session breadcrumb as non-fresh once the session has
-	 * materialized on disk. A no-op unless the current breadcrumb is still fresh.
-	 */
-	#materializeBreadcrumb(): void {
-		if (!this.#breadcrumbFresh || !this.#sessionFile) return;
-		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, false);
+	#rememberBreadcrumb(cwd: string, sessionFile: string): void {
+		if (!this.#suppressBreadcrumb) writeTerminalBreadcrumb(cwd, sessionFile);
 	}
 
 	#clearDiskError(): void {
@@ -1206,7 +1190,6 @@ export class SessionManager {
 					}
 					if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
 						this.#fileIsCurrent = true;
-						this.#materializeBreadcrumb();
 						this.#rewriteRequired = false;
 						this.#hasTitleSlot = true;
 					}
@@ -1219,7 +1202,6 @@ export class SessionManager {
 			// still the pre-repoint source until moveTo repoints it.
 			if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
 				this.#fileIsCurrent = true;
-				this.#materializeBreadcrumb();
 				this.#rewriteRequired = false;
 				this.#hasTitleSlot = true;
 			} else {
@@ -1253,7 +1235,6 @@ export class SessionManager {
 			async () => {
 				if (await this.#runFencedAtomicRewrite(startEpoch)) {
 					this.#fileIsCurrent = true;
-					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
 				}
@@ -1538,7 +1519,7 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
+			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 		} else {
 			this.#sessionFile = undefined;
 		}
@@ -3556,7 +3537,10 @@ export class SessionManager {
 		if (!header) return null;
 		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
 	}
-	/** Continue the most recent session, or create a new one if none exists. */
+	/**
+	 * Continue the folder's most recent session that has a real turn, preferring
+	 * this terminal's own session when it qualifies; create a new one if none.
+	 */
 	static async continueRecent(
 		cwd: string,
 		sessionDir?: string,
@@ -3568,28 +3552,19 @@ export class SessionManager {
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb) {
-			// A lazy fresh-session boundary whose JSONL was never materialized
-			// (for example, initial creation followed by exit before any assistant
-			// output). Honor the boundary rather than falling back to
-			// findMostRecentSession(), which would resurrect an older transcript.
-			// Explicit newSession() boundaries are materialized before it returns so
-			// this remains correct even when the relaunch has a different terminal id.
-			if (
-				breadcrumb.fresh &&
-				!breadcrumb.exists &&
-				(!sessionDir || pathIsWithin(dir, path.dirname(breadcrumb.sessionFile)))
-			) {
-				const manager = new SessionManager(cwd, dir, true, storage);
-				manager.#resetToNewSession();
-				return manager;
-			}
-
 			// Recover stale crumbs: a subagent open (pre-fix) may have pointed this
 			// terminal's breadcrumb at an artifact child; resume the parent instead.
 			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
 			const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 			if (breadcrumbCwd === resolvedCwd) {
-				if (!sessionDir || pathIsWithin(dir, breadcrumb.sessionFile)) {
+				// This terminal's own session wins over a newer one from another
+				// terminal in the same folder, but only when it holds a resumable
+				// turn: a session opened and quit before any reply must not shadow
+				// the folder's latest real transcript.
+				if (
+					(!sessionDir || pathIsWithin(dir, breadcrumb.sessionFile)) &&
+					(await isResumableSessionFile(breadcrumb.sessionFile, storage))
+				) {
 					chosenSession = breadcrumb.sessionFile;
 				}
 			} else {
