@@ -1,6 +1,11 @@
 //! Managing files open within a shell instance.
 
-use std::{collections::HashMap, io::IsTerminal, process::Stdio};
+use std::{
+	collections::HashMap,
+	io::IsTerminal,
+	path::{Component, Path},
+	process::Stdio,
+};
 
 use crate::{ShellFd, error, ioutils, sys};
 
@@ -86,6 +91,44 @@ impl<'de> serde::Deserialize<'de> for OpenFile {
 pub fn null() -> Result<OpenFile, error::Error> {
 	let file = sys::fs::open_null_file()?;
 	Ok(OpenFile::File(file))
+}
+
+/// Returns the shell descriptor a path names when it is a per-process
+/// descriptor alias: `/dev/stdin`, `/dev/stdout`, `/dev/stderr`,
+/// `/dev/fd/N`, `/proc/self/fd/N`, or `/proc/thread-self/fd/N`.
+///
+/// The shell's descriptor table is its own. Opened through the OS, these
+/// paths name the *process's* descriptors instead, which in an embedded shell
+/// (in-process builtins, redirections) are the host's: an interactive host's
+/// stdin is its terminal, and a blocked read there swallows the host's
+/// keystrokes. Callers resolve the alias against the shell's table instead.
+pub fn shell_fd_for_path(path: &Path) -> Option<ShellFd> {
+	let mut components = path.components();
+	if components.next() != Some(Component::RootDir) {
+		return None;
+	}
+	let mut names = components.map(|component| match component {
+		Component::Normal(name) => name.to_str(),
+		_ => None,
+	});
+	let fd = match (names.next()??, names.next()??) {
+		("dev", "stdin") => OpenFiles::STDIN_FD,
+		("dev", "stdout") => OpenFiles::STDOUT_FD,
+		("dev", "stderr") => OpenFiles::STDERR_FD,
+		("dev", "fd") => parse_fd_name(names.next()??)?,
+		("proc", "self" | "thread-self") if names.next()?? == "fd" => parse_fd_name(names.next()??)?,
+		_ => return None,
+	};
+	names.next().is_none().then_some(fd)
+}
+
+/// Parses a descriptor directory entry name: decimal digits only, so `-1` or
+/// `+1` never alias a real descriptor.
+fn parse_fd_name(name: &str) -> Option<ShellFd> {
+	if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+		return None;
+	}
+	name.parse().ok()
 }
 
 impl Clone for OpenFile {

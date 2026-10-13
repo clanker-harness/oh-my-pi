@@ -4667,6 +4667,39 @@ mod tests {
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
+	/// Descriptor aliases name the shell's descriptor table. In-process
+	/// builtins and redirections share the host's process descriptors, so an
+	/// OS open of `/proc/self/fd/0` reached the host's stdin — an interactive
+	/// host's terminal, where the blocked read swallowed every keystroke — and
+	/// `/dev/stdout`/`/dev/stderr` wrote past the capture onto the host's
+	/// terminal. A closed shell descriptor must not fall through either.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_aliases_resolve_against_shell_descriptors() {
+		let script = "grep alias /proc/self/fd/0 <<< operand-alias\n{ cat < /dev/stdin; } <<< \
+		              redirect-alias\ntee /dev/stderr <<< tee-alias > /dev/null\necho stdout-alias \
+		              > /dev/stdout\ncat /dev/fd/9; echo closed-operand=$?\ncat < /dev/fd/9 || echo \
+		              closed-redirect-failed";
+		let (result, output) = time::timeout(
+			Duration::from_secs(5),
+			run_command_capture(script, None, None, CancelToken::default()),
+		)
+		.await
+		.expect("descriptor alias reads must not block on the host's stdin");
+
+		for marker in [
+			"operand-alias",
+			"redirect-alias",
+			"tee-alias",
+			"stdout-alias",
+			"closed-operand=0",
+			"closed-redirect-failed",
+		] {
+			assert!(output.contains(marker), "missing {marker:?}: {output:?}");
+		}
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+	}
+
 	#[cfg(unix)]
 	fn printf_minimizer(
 		settings_path: &std::path::Path,

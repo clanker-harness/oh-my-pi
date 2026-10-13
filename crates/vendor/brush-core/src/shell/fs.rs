@@ -198,16 +198,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		let path_to_open = self.absolute_path(path.as_ref());
 
-		// See if this is a reference to a file descriptor, in which case the actual
-		// /dev/fd* file path for this process may not match with what's in the
-		// execution parameters.
-		if let Some(parent) = path_to_open.parent()
-			&& parent == Path::new("/dev/fd")
-			&& let Some(filename) = path_to_open.file_name()
-			&& let Ok(fd_num) = filename.to_string_lossy().to_string().parse::<ShellFd>()
-			&& let Some(open_file) = params.try_fd(self, fd_num)
-		{
-			return open_file.try_clone();
+		// A descriptor alias (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`, …)
+		// names the shell's descriptor table, not this process's: an embedded
+		// shell's process descriptors are the host's, so neither an open alias
+		// nor a closed one may fall through to an OS open.
+		if let Some(fd_num) = openfiles::shell_fd_for_path(&path_to_open) {
+			return match params.try_fd(self, fd_num) {
+				Some(open_file) => open_file.try_clone(),
+				None => Err(std::io::Error::other(format!("bad file descriptor: {fd_num}"))),
+			};
 		}
 
 		Ok(options.open(path_to_open)?.into())

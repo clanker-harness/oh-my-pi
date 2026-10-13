@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed in-process shell builtins and redirections opening descriptor aliases (`/proc/self/fd/N`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, and `/dev/fd/N` for a closed descriptor) on the host process instead of the command. A bash tool command such as `grep x /proc/self/fd/0 <<< ""` blocked reading omp's terminal and swallowed every keystroke, leaving the prompt unable to accept input; `tee /dev/stderr` and `> /dev/stdout` wrote straight onto the TUI. Aliases now resolve against the shell's own descriptors; a closed one reads as the null device for builtin operands and fails the redirection.
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

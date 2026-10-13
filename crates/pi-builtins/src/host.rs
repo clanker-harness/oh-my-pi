@@ -892,7 +892,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	#[cfg_attr(not(unix), expect(unused_mut, reason = "rewritten only on unix"))]
 	let mut argv: Vec<OsString> = argv.into_iter().map(OsString::from).collect();
 	#[cfg(unix)]
-	let process_substitution_fds = materialize_process_substitution_fds(&context, &mut argv)?;
+	let shell_fd_operands = materialize_shell_fd_operands(&context, &mut argv)?;
 
 	let argv = match U::rewrite_argv(argv) {
 		Ok(argv) => argv,
@@ -925,7 +925,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 
 	let mut handle = tokio::task::spawn_blocking(move || {
 		#[cfg(unix)]
-		let _process_substitution_fds = process_substitution_fds;
+		let _shell_fd_operands = shell_fd_operands;
 		run_caught::<U>(parsed, &mut host)
 	});
 
@@ -1079,23 +1079,19 @@ fn or_null(file: Option<OpenFile>) -> Result<OpenFile, Error> {
 	}
 }
 
-/// Recognizes brush's process-substitution arguments (`/dev/fd/<shell fd>`).
-#[cfg(unix)]
-fn process_substitution_fd(arg: &std::ffi::OsStr) -> Option<brush_core::ShellFd> {
-	arg.to_str()?
-		.strip_prefix("/dev/fd/")?
-		.parse::<brush_core::ShellFd>()
-		.ok()
-}
-
-/// Rewrites `/dev/fd/<shell fd>` arguments to real descriptors of the host
-/// process, returning the owned descriptors that must stay alive for the
-/// duration of the utility.
+/// Rewrites descriptor-alias arguments (`/dev/stdin`, `/dev/fd/<shell fd>`,
+/// `/proc/self/fd/<shell fd>`, …) to real descriptors of the host process,
+/// returning the owned descriptors that must stay alive for the duration of
+/// the utility.
 ///
-/// Brush allocates process-substitution pipes in its own descriptor table, so
-/// the shell fd number in the argument is meaningless to `open`.
+/// The utility runs in-process, so opening an alias through the OS reaches
+/// the host's descriptor of that number, never the command's: brush keeps
+/// process-substitution pipes and redirections in its own table, and the
+/// host's stdin may be its terminal — a blocked read there swallows the
+/// host's keystrokes. A closed shell descriptor gets the null device, as
+/// [`or_null`] does for the standard streams.
 #[cfg(unix)]
-fn materialize_process_substitution_fds<SE: ShellExtensions>(
+fn materialize_shell_fd_operands<SE: ShellExtensions>(
 	context: &ExecutionContext<'_, SE>,
 	argv: &mut [OsString],
 ) -> Result<Vec<std::os::fd::OwnedFd>, Error> {
@@ -1103,12 +1099,10 @@ fn materialize_process_substitution_fds<SE: ShellExtensions>(
 
 	let mut fds = Vec::new();
 	for arg in argv {
-		let Some(shell_fd) = process_substitution_fd(arg) else {
+		let Some(shell_fd) = openfiles::shell_fd_for_path(Path::new(arg.as_os_str())) else {
 			continue;
 		};
-		let Some(file) = context.try_fd(shell_fd) else {
-			continue;
-		};
+		let file = or_null(context.try_fd(shell_fd))?;
 		let fd = file.try_borrow_as_fd()?.try_clone_to_owned()?;
 		*arg = OsString::from(format!("/dev/fd/{}", fd.as_raw_fd()));
 		fds.push(fd);
