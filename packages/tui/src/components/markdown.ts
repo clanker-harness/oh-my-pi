@@ -20,6 +20,7 @@ import {
 	getPaddingX,
 	getSegmenter,
 	isOsc66Line,
+	isSoftWrapMarking,
 	padding,
 	replaceTabs,
 	truncateToWidth,
@@ -1656,6 +1657,8 @@ interface RenderSignature {
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
+	/** Rendered inside `renderWithSoftWrapMarkers`: wrapped rows carry copy markers. */
+	softWrapMarkers: boolean;
 }
 
 interface StreamPrefixLineCache extends RenderSignature {
@@ -2306,6 +2309,7 @@ export class Markdown implements Component {
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
+			softWrapMarkers: isSoftWrapMarking(),
 		};
 	}
 	// All-primitive signature — compare via the canonical render-cache encoding.
@@ -2314,7 +2318,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.softWrapMarkers ? 1 : 0}`;
 	}
 
 	#renderStreamingContentLines(
@@ -2384,6 +2388,7 @@ export class Markdown implements Component {
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
+		if (cache.softWrapMarkers !== signature.softWrapMarkers) return undefined;
 		return cache;
 	}
 
@@ -2474,6 +2479,7 @@ export class Markdown implements Component {
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
+		if (cache.softWrapMarkers !== signature.softWrapMarkers) return start;
 		const limit = Math.min(cache.cachedThrough, tokens.length);
 		for (let i = start; i < limit; i++) {
 			if (cache.rows[i - start] === undefined) return i; // uncacheable token stops the splice

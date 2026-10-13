@@ -1,9 +1,11 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { withoutTerminalMultiplexer } from "./terminal-multiplexer-environment";
+import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -19,7 +21,8 @@ function sgr(button: number, row: number, col: number, release = false): string 
 	return `\x1b[<${button};${col + 1};${row + 1}${release ? "m" : "M"}`;
 }
 
-function makeHarness(initialRows: number, render: (row: number) => string = row => `row ${row}`) {
+/** Fullscreen composer whose transcript holds the single `block`. */
+function mountHarness(block: Component) {
 	const terminal = new VirtualTerminal(COLUMNS, ROWS);
 	const writes: string[] = [];
 	const write = terminal.write.bind(terminal);
@@ -34,9 +37,7 @@ function makeHarness(initialRows: number, render: (row: number) => string = row 
 		preferences: { ...COMPOSER_DEFAULTS, quiet: true, fullscreen: true },
 	});
 	const transcript = new TranscriptContainer();
-	// One block holds every row so the transcript has no inter-block spacers.
-	let rowCount = initialRows;
-	transcript.addChild({ render: () => Array.from({ length: rowCount }, (_, row) => render(row)) });
+	transcript.addChild(block);
 	composer.setRuntimeChildren([transcript, new Text("EDITOR", 0, 0)]);
 	composer.start({ playWelcomeIntro: false });
 	const screen = () => terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
@@ -46,15 +47,24 @@ function makeHarness(initialRows: number, render: (row: number) => string = row 
 		writes,
 		screen,
 		settle: () => scheduler.settle(terminal),
-		/** Stream `count` more transcript rows, as a growing assistant reply would. */
-		grow: async (count: number) => {
-			rowCount += count;
-			composer.ui.requestRender();
-			await scheduler.settle(terminal);
-		},
 		input: async (...data: string[]) => {
 			for (const chunk of data) terminal.sendInput(chunk);
 			await scheduler.settle(terminal);
+		},
+	};
+}
+
+function makeHarness(initialRows: number, render: (row: number) => string = row => `row ${row}`) {
+	// One block holds every row so the transcript has no inter-block spacers.
+	let rowCount = initialRows;
+	const h = mountHarness({ render: () => Array.from({ length: rowCount }, (_, row) => render(row)) });
+	return {
+		...h,
+		/** Stream `count` more transcript rows, as a growing assistant reply would. */
+		grow: async (count: number) => {
+			rowCount += count;
+			h.composer.ui.requestRender();
+			await h.settle();
 		},
 	};
 }
@@ -115,6 +125,32 @@ describe("composer fullscreen main view", () => {
 
 		await h.input(sgr(0, first, 4), sgr(0, first, 4, true));
 		expect(copies).toHaveLength(1);
+
+		h.composer.stop();
+	});
+
+	it("copies soft-wrapped rows as their source lines, keeping real line breaks", async () => {
+		const keywords =
+			"Keywords: machine-generated text detection, AI text detectors, linear representations, activation steering";
+		const item = "The two judges that score every output agree with each other strongly across datasets.";
+		const token = `https://example.com/${"x".repeat(70)}`;
+		const h = mountHarness(new Markdown(`${keywords}\n\n- ${item}\n\n${token}`, 0, 0, defaultMarkdownTheme));
+		const copies: string[] = [];
+		h.composer.setFullscreenInputHandlers({ copy: text => copies.push(text) });
+		await h.settle();
+		const screen = h.screen();
+		const first = screen.findIndex(row => row.startsWith("Keywords:"));
+		const last = screen.findLastIndex(row => row.includes("xxx"));
+		// Each block really wrapped, so the copy below has rows to rejoin.
+		expect(screen[first + 1]).not.toBe("");
+		expect(screen[first + 3]?.startsWith("- The two")).toBe(true);
+		expect(screen[first + 4]?.startsWith("  ")).toBe(true);
+		expect(last - first).toBeGreaterThan(5);
+
+		await h.input(sgr(0, first, 0), sgr(32, last, COLUMNS - 1), sgr(0, last, COLUMNS - 1, true));
+		expect(copies).toEqual([`${keywords}\n\n- ${item}\n\n${token}`]);
+		// The copy markers are render metadata: none may reach the terminal.
+		expect(h.writes.join("")).not.toContain("\x1b_pi:w");
 
 		h.composer.stop();
 	});

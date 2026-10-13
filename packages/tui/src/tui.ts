@@ -49,6 +49,7 @@ import {
 	osc66MaxScale,
 	sliceByColumn,
 	sliceWithWidth,
+	stripSoftWrapMarkers,
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
@@ -3243,45 +3244,50 @@ export class TUI extends Container {
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
+		// Soft-wrap markers are copy metadata for the fullscreen body (see
+		// `renderWithSoftWrapMarkers`); a cached render can carry them into any
+		// frame, so every row drops them here, ahead of the terminal. `raw`
+		// stays the sidecar key.
+		const content = stripSoftWrapMarkers(raw);
 
 		let source: string;
 		let classification: LineClassification;
-		if (raw.length <= maxSourceLength) {
+		if (content.length <= maxSourceLength) {
 			// The overwhelmingly common path classifies image markers, OSC 8,
 			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
-			classification = this.#classifyLine(raw, safeWidth);
+			classification = this.#classifyLine(content, safeWidth);
 			if (classification.isImage) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: content,
+					terminalContent: content,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = raw;
+			source = content;
 		} else {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
 			// entire source for width/OSC metadata that will immediately vanish.
-			if (TERMINAL.isImageLine(raw)) {
+			if (TERMINAL.isImageLine(content)) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: content,
+					terminalContent: content,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			source = this.#lineFitSource(content, safeWidth, maxSourceLength);
 			// Preserve the former lineRewriteSequence classification: fitting can
 			// move a marker from outside the raw scan window into the prepared
 			// line's window, at which point terminal image dispatch owns it.

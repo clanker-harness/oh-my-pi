@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed fullscreen drag-copy breaking wrapped lines: rows the renderer soft-wrapped now paste as their original single line (continuation indent dropped, the space at the break restored), so copied sentences no longer arrive with stray newlines that browser fields turn into glued words like `activationsteering`.
+
 ## [18.3.0] - 2026-09-24
 
 ### Added

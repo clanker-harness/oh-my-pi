@@ -15,7 +15,13 @@ import {
 	type TUIOptions,
 	type ViewportSize,
 } from "../tui";
-import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
+import {
+	readSoftWrapMarkers,
+	renderWithSoftWrapMarkers,
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+} from "../utils";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
@@ -544,16 +550,21 @@ export class Composer implements TerminalFrameProvider {
 		if (this.#runtimeMounted) {
 			const roots = [...this.#runtimeChildren, this.#statusHost];
 			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
-			body = [
-				...this.#header.render(width),
-				...this.#renderRoots(roots.slice(0, Math.max(0, transcriptIndex)), width),
-			];
-			if (transcriptIndex >= 0) {
-				body.push(...(roots[transcriptIndex] as TranscriptContainer).renderAll(width, frame));
-			}
+			// Body rows carry soft-wrap markers so a drag copy rejoins wrapped
+			// lines; the TUI strips them before the terminal sees the frame.
+			body = renderWithSoftWrapMarkers(() => {
+				const rendered = [
+					...this.#header.render(width),
+					...this.#renderRoots(roots.slice(0, Math.max(0, transcriptIndex)), width),
+				];
+				if (transcriptIndex >= 0) {
+					rendered.push(...(roots[transcriptIndex] as TranscriptContainer).renderAll(width, frame));
+				}
+				return rendered;
+			});
 			chrome = this.#renderChromeRoots(roots.slice(transcriptIndex + 1), width);
 		} else {
-			body = this.#renderRoots([this.#header, this.#bootstrapInputGap], width);
+			body = renderWithSoftWrapMarkers(() => this.#renderRoots([this.#header, this.#bootstrapInputGap], width));
 			chrome = this.#renderChromeRoots([this.editor, this.#statusHost], width);
 		}
 		const bodyRows = Math.max(0, rows - chrome.rows.length);
@@ -701,9 +712,13 @@ export class Composer implements TerminalFrameProvider {
 
 	/**
 	 * Finish a drag: the selected plain text (styles stripped, trailing blanks
-	 * trimmed per row). A press released on its own cell is a click, not a
-	 * selection: it clears and returns `undefined`. The highlight otherwise
-	 * stays until the next press or {@link clearFullscreenSelection}.
+	 * trimmed per row). Rows the renderer soft-wrapped rejoin into their source
+	 * line — the continuation's hang indent and the wrapped row's trailing
+	 * padding or border drop, and the whitespace the break consumed returns —
+	 * so a wrapped sentence pastes as one line. A press released on its own
+	 * cell is a click, not a selection: it clears and returns `undefined`. The
+	 * highlight otherwise stays until the next press or
+	 * {@link clearFullscreenSelection}.
 	 */
 	finishFullscreenSelection(): string | undefined {
 		const range = this.#orderedSelection();
@@ -713,13 +728,28 @@ export class Composer implements TerminalFrameProvider {
 			this.clearFullscreenSelection();
 			return undefined;
 		}
+		const lastRow = Math.min(range.end.row, layout.body.length - 1);
 		const lines: string[] = [];
-		for (let row = range.start.row; row <= range.end.row && row < layout.body.length; row++) {
+		let continuesHere = false;
+		let markers = range.start.row <= lastRow ? readSoftWrapMarkers(layout.body[range.start.row]!) : undefined;
+		for (let row = range.start.row; row <= lastRow; row++) {
+			const nextMarkers = row < lastRow ? readSoftWrapMarkers(layout.body[row + 1]!) : undefined;
+			const continuesNext = markers?.end !== undefined && nextMarkers?.start !== undefined;
 			const plain = Bun.stripANSI(layout.body[row]!);
 			const lineWidth = visibleWidth(plain);
-			const from = row === range.start.row ? range.start.col : 0;
-			const to = row === range.end.row ? Math.min(lineWidth, range.end.col + 1) : lineWidth;
-			lines.push(to > from ? sliceWithWidth(plain, from, to - from).text.trimEnd() : "");
+			let from = row === range.start.row ? range.start.col : 0;
+			if (continuesHere) from = Math.max(from, markers!.start!.col);
+			let to = row === range.end.row ? Math.min(lineWidth, range.end.col + 1) : lineWidth;
+			if (continuesNext) to = Math.min(to, markers!.end!);
+			const text = to > from ? sliceWithWidth(plain, from, to - from).text.trimEnd() : "";
+			if (continuesHere) {
+				const head = lines[lines.length - 1]!;
+				lines[lines.length - 1] = head && text ? `${head}${markers!.start!.gap}${text}` : head + text;
+			} else {
+				lines.push(text);
+			}
+			continuesHere = continuesNext;
+			markers = nextMarkers;
 		}
 		return lines.join("\n");
 	}

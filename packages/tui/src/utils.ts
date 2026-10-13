@@ -175,8 +175,120 @@ export function truncateToWidth(
 	);
 }
 
+// Soft-wrap markers: zero-width APC sentinels (the CURSOR_MARKER family) that
+// tag rows `wrapTextWithAnsi` broke without a source newline, so a fullscreen
+// drag copy can rejoin them. `SOFT_WRAP_END` closes a row that continues on
+// the next; the next row opens with `\x1b_pi:ws<gap>\x1b\\`, where `<gap>` is
+// the whitespace the break dropped (empty for a long word split mid-token).
+// They end in ST, not BEL: `Bun.stripANSI` closes APC only at ST and would
+// swallow the row's text after a BEL-terminated one. The TUI strips both
+// before any terminal write.
+const SOFT_WRAP_MARKER_PREFIX = "\x1b_pi:w";
+const SOFT_WRAP_MARKER_END = "\x1b\\";
+const SOFT_WRAP_END = `${SOFT_WRAP_MARKER_PREFIX}e${SOFT_WRAP_MARKER_END}`;
+const SOFT_WRAP_START_PREFIX = `${SOFT_WRAP_MARKER_PREFIX}s`;
+const SOFT_WRAP_MARKER_REGEX = /\x1b_pi:w(?:e|s[ \t]*)\x1b\\/g;
+const SOFT_WRAP_START_REGEX = /\x1b_pi:ws([ \t]*)\x1b\\/;
+
+let softWrapMarking = false;
+
+/**
+ * Run `render` with soft-wrap markers on: every `wrapTextWithAnsi` call inside
+ * tags the rows it continued. Renders outside the scope stay byte-identical.
+ */
+export function renderWithSoftWrapMarkers<T>(render: () => T): T {
+	const previous = softWrapMarking;
+	softWrapMarking = true;
+	try {
+		return render();
+	} finally {
+		softWrapMarking = previous;
+	}
+}
+
+/** Whether {@link renderWithSoftWrapMarkers} is active, for render caches keyed on output bytes. */
+export function isSoftWrapMarking(): boolean {
+	return softWrapMarking;
+}
+
+/** Remove every soft-wrap marker; returns `line` itself when it carries none. */
+export function stripSoftWrapMarkers(line: string): string {
+	return line.includes(SOFT_WRAP_MARKER_PREFIX) ? line.replace(SOFT_WRAP_MARKER_REGEX, "") : line;
+}
+
+/** Soft-wrap geometry of one rendered row, in terminal columns. */
+export interface SoftWrapMarkers {
+	/** The row continues the previous row from column `col`; `gap` is the whitespace the break dropped. */
+	start?: { col: number; gap: string };
+	/** The row continues on the next row; its wrapped content ends at this column. */
+	end?: number;
+}
+
+/** Read a row's soft-wrap markers, or `undefined` when it carries none. */
+export function readSoftWrapMarkers(line: string): SoftWrapMarkers | undefined {
+	if (!line.includes(SOFT_WRAP_MARKER_PREFIX)) return undefined;
+	const markers: SoftWrapMarkers = {};
+	const start = SOFT_WRAP_START_REGEX.exec(line);
+	if (start) markers.start = { col: visibleWidth(line.slice(0, start.index)), gap: start[1]! };
+	const end = line.lastIndexOf(SOFT_WRAP_END);
+	if (end !== -1) markers.end = visibleWidth(line.slice(0, end));
+	return markers;
+}
+
+/** Whether `text` has a non-blank (not space/tab) character at or after `from`. */
+function hasContentFrom(text: string, from: number): boolean {
+	for (let i = from; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code !== 0x20 && code !== 0x09) return true;
+	}
+	return false;
+}
+
+/**
+ * Tag the soft breaks in native `rows` for `text`. The native wrapper wraps
+ * each `\n`-separated line on its own, trims the whitespace at a break, and
+ * splits over-wide words with no separator, so walking each source line's
+ * plain text against its rows recovers both the breaks and the exact dropped
+ * gap. Any misalignment (e.g. OSC 66 payload text) returns `rows` untagged:
+ * a copy then keeps the rendered row breaks, as it did before markers.
+ */
+function markSoftWraps(text: string, rows: string[]): string[] {
+	const sourceLines = text.split("\n");
+	if (rows.length <= sourceLines.length) return rows;
+	const breaks: { row: number; gap: string }[] = [];
+	let rowIndex = 0;
+	for (const sourceLine of sourceLines) {
+		const source = Bun.stripANSI(sourceLine);
+		const first = rows[rowIndex];
+		if (first === undefined) return rows;
+		const firstPlain = Bun.stripANSI(first);
+		if (!source.startsWith(firstPlain)) return rows;
+		let cursor = firstPlain.length;
+		rowIndex++;
+		while (hasContentFrom(source, cursor)) {
+			const row = rows[rowIndex];
+			if (row === undefined) return rows;
+			const plain = Bun.stripANSI(row);
+			const at = plain.length > 0 ? source.indexOf(plain, cursor) : -1;
+			if (at === -1) return rows;
+			const gap = source.slice(cursor, at);
+			if (hasContentFrom(gap, 0)) return rows;
+			breaks.push({ row: rowIndex, gap });
+			cursor = at + plain.length;
+			rowIndex++;
+		}
+	}
+	if (rowIndex !== rows.length) return rows;
+	for (const { row, gap } of breaks) {
+		rows[row - 1] += SOFT_WRAP_END;
+		rows[row] = `${SOFT_WRAP_START_PREFIX}${gap}${SOFT_WRAP_MARKER_END}${rows[row]}`;
+	}
+	return rows;
+}
+
 export function wrapTextWithAnsi(text: string, width: number): string[] {
-	return nativeWrapTextWithAnsi(text, width, DEFAULT_TAB_WIDTH);
+	const rows = nativeWrapTextWithAnsi(text, width, DEFAULT_TAB_WIDTH);
+	return softWrapMarking ? markSoftWraps(text, rows) : rows;
 }
 
 export function extractSegments(
