@@ -49,6 +49,7 @@ export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -58,6 +59,7 @@ const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -69,6 +71,7 @@ export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -79,6 +82,7 @@ const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -118,6 +122,7 @@ function createTaskSchema(options: {
 	defaultAgent: string;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
+	structured: boolean;
 	modelEnabled: boolean;
 	teamsEnabled: boolean;
 }): BaseType {
@@ -128,11 +133,13 @@ function createTaskSchema(options: {
 		"name?": "string",
 		agent: taskAgentSchemaRule(options.defaultAgent),
 		task: "string",
+		solutionSpace: "string",
 		...(options.effortEnabled ? { "effort?": effortRule } : {}),
 		...(options.modelEnabled ? { "model?": "string" } : {}),
 		...(options.teamsEnabled && options.batchEnabled ? { "role?": "string" } : {}),
-		"outputSchema?": outputSchemaInputSchema,
-		"schemaMode?": '"permissive" | "strict"',
+		...(options.structured
+			? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
+			: {}),
 		...(options.evalToolsEnabled ? { "tools?": "string[]" } : {}),
 		...(options.isolationEnabled ? { "isolated?": "boolean" } : {}),
 		"+": "delete",
@@ -153,6 +160,8 @@ export function getTaskSchema(options: {
 	effortEnabled?: boolean;
 	/** Advertise the `tools` field for eval-defined tools (`eval.tools.enabled`, default on). */
 	evalToolsEnabled?: boolean;
+	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
+	structured?: boolean;
 	/** Advertise the per-spawn `model` field (`task.enableModelSelection`, default on). */
 	modelEnabled?: boolean;
 	/** Advertise the batch `team` / per-item `role` fields (`task.teams.enabled`). */
@@ -162,19 +171,21 @@ export function getTaskSchema(options: {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	const evalToolsEnabled = options.evalToolsEnabled ?? true;
+	const structured = options.structured ?? true;
 	const modelEnabled = options.modelEnabled ?? false;
 	const teamsEnabled = options.teamsEnabled ?? false;
-	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && !modelEnabled && !teamsEnabled) {
+	if (defaultAgent === "task" && !effortEnabled && evalToolsEnabled && structured && !modelEnabled && !teamsEnabled) {
 		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
 		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${modelEnabled ? "model" : "nomodel"}:${teamsEnabled ? "team" : "noteam"}:${defaultAgent}`;
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${evalToolsEnabled ? "tools" : "notools"}:${structured ? "structured" : "prose"}:${modelEnabled ? "model" : "nomodel"}:${teamsEnabled ? "team" : "noteam"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({
 		...options,
 		effortEnabled,
 		evalToolsEnabled,
+		structured,
 		modelEnabled,
 		teamsEnabled,
 		defaultAgent,

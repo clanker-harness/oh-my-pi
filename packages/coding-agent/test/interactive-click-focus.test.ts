@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -15,6 +15,8 @@ import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task"
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+
+import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
@@ -35,8 +37,7 @@ describe("inline click-to-focus geometry", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-click-focus-e2e-");
-		// Inline (normal-buffer) behavior under test; fullscreen main view has no native scrollback.
-		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "tui.fullscreen": false } });
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -44,7 +45,8 @@ describe("inline click-to-focus geometry", () => {
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated(),
+			// Inline (normal-buffer) behavior under test; fullscreen main view has no native scrollback.
+			settings: Settings.isolated({ "tui.fullscreen": false }),
 			modelRegistry,
 		});
 		term = new VirtualTerminal(120, 32);
@@ -116,7 +118,7 @@ describe("inline click-to-focus geometry", () => {
 	});
 
 	it("bands the hovered live card and clears it off-target", async () => {
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(mode.settings, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
@@ -205,12 +207,12 @@ describe("inline click-to-focus geometry", () => {
 		// Disabling capture mid-hover clears the controller cache too: after
 		// re-enabling, motion over the same card must restore the band instead
 		// of looking unchanged and skipping the repaint.
-		settings.set("tui.mouse", false);
+		cfgTuiMouse.set(mode.settings, false);
 		mode.ui.requestRender();
 		await term.waitForRender(() => !changed(before));
 		expect(workerBg()).toEqual(before);
 
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(mode.settings, true);
 		mode.ui.requestRender();
 		await term.waitForRender();
 		const cardRow = plainRows(term.getViewport()).findIndex(line => line.includes("HoverWorker"));
@@ -227,7 +229,7 @@ describe("inline click-to-focus geometry", () => {
 	});
 
 	it("expands and collapses the pinned jump list through SGR clicks", async () => {
-		settings.set("tui.mouse", true);
+		cfgTuiMouse.set(mode.settings, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();

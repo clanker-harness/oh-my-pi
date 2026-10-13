@@ -11,6 +11,20 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { assistantMsg, createTestSession, userMsg } from "./utilities";
 
+import {
+	cfgAutocompleteMaxVisible,
+	cfgComposerShape,
+	cfgShowHardwareCursor,
+	cfgSpellingAutocomplete,
+	cfgSpellingAutocorrect,
+	cfgSpellingTypoDetection,
+	cfgStartupQuiet,
+	cfgTuiFullscreen,
+	cfgTuiImeSafeCursor,
+	cfgTuiMaxInlineImages,
+	cfgTuiResizeScrollback,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 // Every destructive reset emits one erase-scrollback (ED3). Count that
 // operation without coupling this regression to the ED2/ED3 ordering.
 const ERASE_SCROLLBACK = "\x1b[3J";
@@ -45,17 +59,17 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		// These cases pin the inline (normal-buffer) startup paint: native-history clears only exist there.
 		settings = await Settings.init({ inMemory: true, overrides: { "tui.fullscreen": false } });
 		config = {
-			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
-			showHardwareCursor: settings.get("showHardwareCursor"),
-			maxInlineImages: settings.get("tui.maxInlineImages"),
-			resizeScrollback: settings.get("tui.resizeScrollback"),
-			imeSafeCursor: settings.get("tui.imeSafeCursor"),
-			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
-			spellingTypoDetection: settings.get("spelling.typoDetection"),
-			spellingAutocomplete: settings.get("spelling.autocomplete"),
-			spellingAutocorrect: settings.get("spelling.autocorrect"),
-			fullscreen: settings.get("tui.fullscreen"),
+			quiet: cfgStartupQuiet.get(settings),
+			composerShape: cfgComposerShape.get(settings) ?? "box",
+			showHardwareCursor: cfgShowHardwareCursor.get(settings),
+			maxInlineImages: cfgTuiMaxInlineImages.get(settings),
+			resizeScrollback: cfgTuiResizeScrollback.get(settings),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
+			spellingTypoDetection: cfgSpellingTypoDetection.get(settings),
+			spellingAutocomplete: cfgSpellingAutocomplete.get(settings),
+			spellingAutocorrect: cfgSpellingAutocorrect.get(settings),
+			fullscreen: cfgTuiFullscreen.get(settings),
 		};
 	});
 
@@ -72,11 +86,16 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 		scrollBuffer: string;
 	}> {
 		const terminal = new CapturingTerminal(100, 30);
-		beginStartupComposer({ preferences: config, terminal, version: "18.0.4", cache: false });
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "18.0.4",
+			cache: false,
+		});
 		await terminal.waitForRender();
 		const lease = takeStartupComposerLease();
 		expect(lease).toBeDefined();
-		const testSession = await createTestSession({ inMemory: true });
+		const testSession = await createTestSession({ inMemory: true, settingsOverrides: { "tui.fullscreen": false } });
 		if (resuming) {
 			testSession.sessionManager.appendMessage(userMsg("resume marker question"));
 			testSession.sessionManager.appendMessage(assistantMsg("resume marker answer"));

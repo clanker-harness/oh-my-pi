@@ -74,7 +74,12 @@ describe("spawn model validation", () => {
 describe("task wire schema model/team gating", () => {
 	it("drops a caller model when per-spawn model selection is off", () => {
 		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, modelEnabled: false });
-		const parsed = schema({ agent: "scout", task: "Map the auth module.", model: "@smol" });
+		const parsed = schema({
+			agent: "scout",
+			task: "Map the auth module.",
+			solutionSpace: "map only",
+			model: "@smol",
+		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
 			expect("model" in parsed).toBe(false);
@@ -83,7 +88,12 @@ describe("task wire schema model/team gating", () => {
 
 	it("carries a caller model when enabled", () => {
 		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, modelEnabled: true });
-		const parsed = schema({ agent: "scout", task: "Map the auth module.", model: "@smol" });
+		const parsed = schema({
+			agent: "scout",
+			task: "Map the auth module.",
+			solutionSpace: "map only",
+			model: "@smol",
+		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
 			expect((parsed as { model?: string }).model).toBe("@smol");
@@ -100,7 +110,15 @@ describe("task wire schema model/team gating", () => {
 		const parsed = schema({
 			context: "Refactor the auth module.",
 			team: "refactor",
-			tasks: [{ agent: "task", task: "Port the token store.", role: "backend", model: "@slow" }],
+			tasks: [
+				{
+					agent: "task",
+					task: "Port the token store.",
+					solutionSpace: "one port, API given",
+					role: "backend",
+					model: "@slow",
+				},
+			],
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {
@@ -116,7 +134,9 @@ describe("task wire schema model/team gating", () => {
 		const parsed = schema({
 			context: "Refactor the auth module.",
 			team: "refactor",
-			tasks: [{ agent: "task", task: "Port the token store.", role: "backend" }],
+			tasks: [
+				{ agent: "task", task: "Port the token store.", solutionSpace: "one port, API given", role: "backend" },
+			],
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (parsed && typeof parsed === "object" && !(parsed instanceof type.errors)) {

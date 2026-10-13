@@ -20,6 +20,7 @@ import { getKnownRoleIds, MODEL_ROLE_ALIAS_PREFIX } from "../config/model-roles"
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString, normalizeModelPatternList, resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { cfgTaskAllowedSpawnModels } from "./settings";
 
 /** What a caller may name in a spawn's `model` field for this session. */
 export interface SpawnModelAuthorization {
@@ -58,7 +59,7 @@ export function spawnModelAuthorization(host: SpawnModelPolicyHost): SpawnModelA
 	const registry = host.modelRegistry;
 	return {
 		roles: getKnownRoleIds(host.settings),
-		allowlist: normalizeModelPatternList(host.settings.get("task.allowedSpawnModels")),
+		allowlist: normalizeModelPatternList(cfgTaskAllowedSpawnModels.get(host.settings)),
 		// No registry (isolated tests, host embeddings) means nothing local can
 		// prove a selector wrong, so accept it and let the provider decide.
 		resolve: registry

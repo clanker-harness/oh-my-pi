@@ -36,8 +36,7 @@ describe("libkitty end-to-end", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-libkitty-e2e-");
-		// Inline (normal-buffer) behavior under test; fullscreen main view has no native scrollback.
-		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "tui.fullscreen": false } });
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -45,7 +44,8 @@ describe("libkitty end-to-end", () => {
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated(),
+			// Inline (normal-buffer) behavior under test; fullscreen main view has no native scrollback.
+			settings: Settings.isolated({ "tui.fullscreen": false }),
 			modelRegistry,
 		});
 		term = new VirtualTerminal(120, 32);
@@ -102,7 +102,7 @@ describe("libkitty end-to-end", () => {
 		const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
 		if (drafts.length !== 1) dump("scroll buffer after resizes", buffer);
 		expect(drafts.length).toBe(1);
-		const welcomes = buffer.filter(row => row.includes("Welcome back!"));
+		const welcomes = buffer.filter(row => row.includes("vtest"));
 		expect(welcomes.length).toBe(1);
 	});
 
@@ -125,7 +125,7 @@ describe("libkitty end-to-end", () => {
 		const editors = viewport.filter(row => row.includes("MARKER_DRAFT"));
 		if (editors.length !== 1) dump("viewport after overflowing shrink", viewport);
 		expect(editors.length).toBe(1);
-		expect(viewport.filter(row => row.includes("Welcome back!")).length).toBeLessThanOrEqual(1);
+		expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
 		const buffer = plainRows(term.getScrollBuffer());
 		expect(buffer.filter(row => row.includes("MARKER_DRAFT")).length).toBe(1);
 	});
@@ -137,6 +137,7 @@ describe("libkitty end-to-end", () => {
 		term.sendInput("MARKER_DRAFT");
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFT")));
 
+		mode.ui.setResizeScrollback("rebuild");
 		// Drag storm: several unsettled steps inside one settle window.
 		term.resize(112, 30);
 		await Bun.sleep(30);
@@ -149,21 +150,34 @@ describe("libkitty end-to-end", () => {
 		term.resize(96, 18);
 		await Bun.sleep(300);
 		await term.waitForRender();
-		term.resize(120, 32);
-		await Bun.sleep(300);
-		await term.waitForRender();
 
-		const buffer = plainRows(term.getScrollBuffer());
-		const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
-		if (drafts.length !== 1) dump("scroll buffer after drag storm", buffer);
-		expect(drafts.length).toBe(1);
-		const viewport = plainRows(term.getViewport());
-		expect(viewport.filter(row => row.includes("Welcome back!")).length).toBeLessThanOrEqual(1);
+		// Observe only paints after the final resize begins: the initial frame
+		// used this same size and must not satisfy the completion condition.
+		let rebuiltSize: string | undefined;
+		const removePaintListener = mode.ui.addPaintListener(paint => {
+			if (paint.reset && !paint.alt) rebuiltSize = `${paint.columns}x${paint.rows}`;
+		});
+		try {
+			term.resize(120, 32);
+			await term.waitForRender(() => rebuiltSize === "120x32");
+			// The polling helper times out without throwing. Require the actual
+			// normal-buffer replay before checking for duplicate transcript rows.
+			expect(rebuiltSize).toBe("120x32");
 
-		// The editor is still live: typing paints into the one surviving editor.
-		term.sendInput("X");
-		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFTX")));
-		expect(plainRows(term.getViewport()).filter(row => row.includes("MARKER_DRAFTX")).length).toBe(1);
+			const buffer = plainRows(term.getScrollBuffer());
+			const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
+			if (drafts.length !== 1) dump("scroll buffer after drag storm", buffer);
+			expect(drafts.length).toBe(1);
+			const viewport = plainRows(term.getViewport());
+			expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
+
+			// The editor is still live: typing paints into the one surviving editor.
+			term.sendInput("X");
+			await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("MARKER_DRAFTX")));
+			expect(plainRows(term.getViewport()).filter(row => row.includes("MARKER_DRAFTX")).length).toBe(1);
+		} finally {
+			removePaintListener();
+		}
 	});
 
 	it("hides thinking already retired to native scrollback when Ctrl+T toggles", async () => {
