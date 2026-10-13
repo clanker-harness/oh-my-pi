@@ -169,6 +169,15 @@ function shiftClickSpan(span: ViewportClickSpan, base: number, length: number, i
 	into.push({ start: clamped, end, candidates: (local: number) => span.candidates(local + skew) });
 }
 
+/** Chrome rendered below the transcript, in chrome-local rows. */
+interface ChromeRender {
+	rows: string[];
+	/** Click spans of its row targets. */
+	spans: ViewportClickSpan[];
+	/** The editor's first row; `undefined` when the editor is not part of this chrome. */
+	editorTop: number | undefined;
+}
+
 /** A cell in the fullscreen body: `row` indexes the scrollable content, `col` is a terminal column. */
 interface FullscreenPoint {
 	row: number;
@@ -301,12 +310,14 @@ export class Composer implements TerminalFrameProvider {
 	#fullscreenTop: number | undefined;
 	/** Last fullscreen frame's scrollable body and geometry, for scroll clamping, hit-testing, and copy. */
 	#fullscreenLayout: { body: readonly string[]; top: number; bodyRows: number } | undefined;
+	/** Screen row of the editor's first rendered row in the last fullscreen frame; `undefined` when it is not chrome. */
+	#fullscreenEditorTop: number | undefined;
 	/** Drag selection in body-content coordinates; `focus` follows the pointer, both ends inclusive. */
 	#fullscreenSelection: { anchor: FullscreenPoint; focus: FullscreenPoint } | undefined;
 	/** Transient notice (e.g. "Copied …") on the body's last row; outranks the scroll indicator. */
 	#fullscreenNotice: { text: string; until: number } | undefined;
-	/** A left press landed in the fullscreen body and is extending a drag selection. */
-	#fullscreenDragging = false;
+	/** Where a left press started the drag in progress: the scrollable body or the editor's text. */
+	#fullscreenDrag: "body" | "editor" | undefined;
 	#fullscreenHandlers: FullscreenInputHandlers = {};
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
@@ -483,13 +494,17 @@ export class Composer implements TerminalFrameProvider {
 
 	/**
 	 * Render the chrome below the transcript (live HUDs, editor, status) plus
-	 * the click spans of its row targets, in chrome-local rows.
+	 * the click spans of its row targets and the editor's first row, in
+	 * chrome-local rows. The editor is found as a root or a direct child of a
+	 * plain container root (InteractiveMode's `editorContainer`).
 	 */
-	#renderChromeRoots(roots: readonly Component[], width: number): { rows: string[]; spans: ViewportClickSpan[] } {
+	#renderChromeRoots(roots: readonly Component[], width: number): ChromeRender {
 		const rows: string[] = [];
 		const spans: ViewportClickSpan[] = [];
+		let editorTop: number | undefined;
 		for (const root of roots) {
 			const start = rows.length;
+			if (root === this.editor) editorTop = start;
 			// Row targets usually nest one level down: chrome roots are plain
 			// containers (the HUD lives inside `subagentContainer`), and
 			// `Container.render` is a pure concatenation, so child spans tile
@@ -505,6 +520,7 @@ export class Composer implements TerminalFrameProvider {
 			if (plainContainer) {
 				let offset = start;
 				for (let index = 0; index < targets.length; index++) {
+					if (targets[index] === this.editor) editorTop = rows.length;
 					const childLines = targets[index]!.render(width);
 					rows.push(...childLines);
 					if (index > lastTarget) continue;
@@ -528,7 +544,7 @@ export class Composer implements TerminalFrameProvider {
 				offset += childLines;
 			}
 		}
-		return { rows, spans };
+		return { rows, spans, editorTop };
 	}
 
 	/**
@@ -546,7 +562,7 @@ export class Composer implements TerminalFrameProvider {
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
 		let body: string[];
-		let chrome: { rows: string[]; spans: ViewportClickSpan[] };
+		let chrome: ChromeRender;
 		if (this.#runtimeMounted) {
 			const roots = [...this.#runtimeChildren, this.#statusHost];
 			const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
@@ -594,6 +610,8 @@ export class Composer implements TerminalFrameProvider {
 		const spans: ViewportClickSpan[] = [];
 		for (const span of chrome.spans) shiftClickSpan(span, lines.length - chrome.rows.length, lines.length, spans);
 		this.#lastClickSpans = spans;
+		this.#fullscreenEditorTop =
+			chrome.editorTop === undefined ? undefined : chrome.editorTop + lines.length - chrome.rows.length;
 		return this.#paintHoverBand(lines, spans);
 	}
 
@@ -770,7 +788,8 @@ export class Composer implements TerminalFrameProvider {
 	/**
 	 * Fullscreen main-view input, Claude Code's model. With mouse capture on,
 	 * every SGR report is consumed so none reaches the editor as text: the
-	 * wheel scrolls, a left drag in the body selects and copies on release,
+	 * wheel scrolls, a left drag in the body or the editor's text selects and
+	 * copies on release, a click in the editor's text moves its cursor there,
 	 * and the rest (chrome clicks, hover) goes to the host. Keys apply while
 	 * the editor has focus: PgUp/PgDn page by half a screen (taking them from
 	 * draft paging), ctrl+Home/ctrl+End jump to either end, Esc drops a
@@ -779,7 +798,7 @@ export class Composer implements TerminalFrameProvider {
 	 */
 	#handleFullscreenInput(data: string): { consume: true } | undefined {
 		if (!this.isFullscreen() || this.ui.hasOverlay()) {
-			this.#fullscreenDragging = false;
+			this.#fullscreenDrag = undefined;
 			return undefined;
 		}
 		if (data.startsWith("\x1b[<")) {
@@ -792,7 +811,7 @@ export class Composer implements TerminalFrameProvider {
 		else if (matchesKey(data, "pageDown")) this.pageFullscreen(1);
 		else if (matchesKey(data, "ctrl+home")) this.scrollFullscreenTo("top");
 		else if (matchesKey(data, "ctrl+end")) this.scrollFullscreenTo("bottom");
-		else if (matchesKey(data, "escape") && this.clearFullscreenSelection()) return { consume: true };
+		else if (matchesKey(data, "escape") && this.#clearSelections()) return { consume: true };
 		else {
 			if (getKeybindings().matches(data, "tui.input.submit")) this.scrollFullscreenTo("bottom");
 			return undefined;
@@ -806,19 +825,49 @@ export class Composer implements TerminalFrameProvider {
 			return;
 		}
 		if (event.leftClick) {
-			this.#fullscreenDragging = this.beginFullscreenSelection(event.row, event.col);
-			if (this.#fullscreenDragging) return;
-		} else if (this.#fullscreenDragging && event.motion && (event.button & 3) === 0) {
+			// One selection at a time: either press drops the other surface's highlight.
+			const inEditor = this.#beginEditorSelection(event.row, event.col);
+			const inBody = this.beginFullscreenSelection(event.row, event.col);
+			this.#fullscreenDrag = inEditor ? "editor" : inBody ? "body" : undefined;
+			if (this.#fullscreenDrag !== undefined) return;
+		} else if (this.#fullscreenDrag !== undefined && event.motion && (event.button & 3) === 0) {
 			// Bit 32 marks motion; the low bits are the held button (0 = left).
-			this.extendFullscreenSelection(event.row, event.col);
+			if (this.#fullscreenDrag === "body") {
+				this.extendFullscreenSelection(event.row, event.col);
+			} else if (this.#fullscreenEditorTop !== undefined) {
+				this.editor.extendMouseSelection(event.row - this.#fullscreenEditorTop, event.col);
+				this.ui.requestRender();
+			}
 			return;
-		} else if (this.#fullscreenDragging && event.release) {
-			this.#fullscreenDragging = false;
-			const text = this.finishFullscreenSelection();
+		} else if (this.#fullscreenDrag !== undefined && event.release) {
+			const drag = this.#fullscreenDrag;
+			this.#fullscreenDrag = undefined;
+			const text = drag === "body" ? this.finishFullscreenSelection() : this.editor.finishMouseSelection();
+			if (drag === "editor") this.ui.requestRender();
 			if (text) this.#fullscreenHandlers.copy?.(text);
 			return;
 		}
 		this.#fullscreenHandlers.pointer?.(event);
+	}
+
+	/**
+	 * A press on the focused editor's text places its cursor and anchors a
+	 * drag; any other press drops the editor's highlight.
+	 */
+	#beginEditorSelection(row: number, col: number): boolean {
+		const top = this.#fullscreenEditorTop;
+		const hit =
+			top !== undefined && this.ui.getFocused() === this.editor && this.editor.beginMouseSelection(row - top, col);
+		if (hit || this.editor.clearMouseSelection()) this.ui.requestRender();
+		return hit;
+	}
+
+	/** Drop the body and editor drag highlights. Returns whether either existed. */
+	#clearSelections(): boolean {
+		const body = this.clearFullscreenSelection();
+		const editor = this.editor.clearMouseSelection();
+		if (editor) this.ui.requestRender();
+		return body || editor;
 	}
 
 	/**

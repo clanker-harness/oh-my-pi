@@ -196,8 +196,12 @@ app instead of scrolling their own history.
   streams below, and returning to the bottom re-attaches. Wheel (3 rows),
   PgUp/PgDn (half the body), ctrl+Home/ctrl+End, and left-drag selection are
   handled by a composer input listener registered before any host listener.
-  The host supplies clipboard and click-to-focus hooks via
-  `setFullscreenInputHandlers`.
+  Presses on the focused editor's text go to the editor instead: a click
+  places its cursor, and a drag selects buffer text (wrapped rows rejoin,
+  real newlines stay). One selection exists at a time, Esc clears it before
+  the editor's interrupt sees the key, and any other key drops an editor
+  highlight. The host supplies clipboard and click-to-focus hooks via
+  `setFullscreenInputHandlers`; both drags copy on release.
 - Alt frames are diffed per row, so a streaming reply rewrites only the rows
   that changed; forced repaints and image rows rewrite the whole frame. The
   hardware cursor follows the frame's `CURSOR_MARKER` inside the same

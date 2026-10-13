@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added mouse editing to the fullscreen prompt editor: clicking its text moves the cursor there, and dragging selects text and copies it on release, the same way transcript drag-copy works. Copies use the exact draft text, so a wrapped line pastes as one line. Esc clears the highlight.
+
 ### Fixed
 
 - Fixed fullscreen drag-copy breaking wrapped lines: rows the renderer soft-wrapped now paste as their original single line (continuation indent dropped, the space at the break restored), so copied sentences no longer arrive with stray newlines that browser fields turn into glued words like `activationsteering`.
