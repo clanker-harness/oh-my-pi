@@ -14,6 +14,7 @@ beforeAll(async () => {
 const authStorage = {
 	credentials: { has: (_providerId: string) => false },
 	keys: { source: (_providerId: string) => undefined },
+	oauth: { accounts: (_providerId: string) => [] },
 } as unknown as AuthStorage;
 
 describe("OAuthSelectorComponent", () => {
@@ -62,6 +63,7 @@ describe("OAuthSelectorComponent", () => {
 							? { kind: "api_key", concrete: true }
 							: undefined,
 				},
+				oauth: { accounts: () => [] },
 			} as unknown as AuthStorage,
 			providerId => selected.push(providerId),
 			() => {},
@@ -91,6 +93,7 @@ describe("OAuthSelectorComponent", () => {
 					source: (providerId: string) =>
 						providerId === "opencode-go" ? { kind: "api_key", concrete: true } : undefined,
 				},
+				oauth: { accounts: () => [] },
 			} as unknown as AuthStorage,
 			providerId => selected.push(providerId),
 			() => {},
@@ -184,6 +187,7 @@ describe("OAuthSelectorComponent", () => {
 						source: (providerId: string) =>
 							providerId === "opencode-go" ? { kind: "api_key", concrete: true } : undefined,
 					},
+					oauth: { accounts: () => [] },
 				} as unknown as AuthStorage,
 				providerId => selected.push(providerId),
 				() => {},

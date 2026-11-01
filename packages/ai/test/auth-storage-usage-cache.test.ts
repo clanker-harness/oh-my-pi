@@ -17,13 +17,18 @@ import {
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	type AuthStorageOptions,
+	type OAuthCredential,
+	REMOTE_REFRESH_SENTINEL,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
+import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 function anthropicReports(reports: UsageReport[] | null): UsageReport[] {
@@ -97,10 +102,10 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 			return rows;
 		},
 		async deleteAuthCredentials() {},
-		getCache(key) {
+		getCache(key, options) {
 			const entry = cache.get(key);
 			if (!entry) return null;
-			if (entry.expiresAtSec * 1000 <= Date.now()) return null;
+			if (!options?.includeExpired && entry.expiresAtSec * 1000 <= Date.now()) return null;
 			return entry.value;
 		},
 		setCache(key, value, expiresAtSec) {
@@ -369,6 +374,11 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(second).toHaveLength(1);
 		// The fallback value must be the SAME report (not a synthetic empty one).
 		expect(second?.[0]?.limits[0]?.amount.used).toBe(42);
+		expect(second[0]?.fetchedAt).toBe(goldReport.fetchedAt);
+		expect(second[0]?.metadata?.stale).toBe(true);
+		const cooldown = anthropicReports(await storage.usage.reports());
+		expect(cooldown[0]?.metadata?.stale).toBe(true);
+		expect(calls).toBe(2);
 	});
 
 	it("re-attempts the failing credential after the cool-down expires", async () => {
@@ -390,12 +400,48 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		const second = anthropicReports(await storage.usage.reports());
 		expect(second).toHaveLength(1); // last-good fallback
 		expect(calls).toBe(2);
+		expect(second[0]?.metadata?.stale).toBe(true);
 
 		// Expire the cool-down → poll 3 refetches → success.
 		expireCachePayloads(store);
 		const third = anthropicReports(await storage.usage.reports());
 		expect(third).toHaveLength(1);
 		expect(calls).toBe(3);
+		expect(third[0]?.metadata).not.toHaveProperty("stale");
+	});
+
+	it("bounds repeated transient fallback and cooldown by the original fetchedAt", async () => {
+		const start = Date.now();
+		const now = vi.spyOn(Date, "now").mockReturnValue(start);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		const row = store.listAuthCredentials("anthropic")[0];
+		if (row?.credential.type !== "oauth") throw new Error("expected OAuth test credential");
+		row.credential.expires = start + 48 * 60 * 60_000;
+		await storage.credentials.reload();
+		const goldReport = makeReport("a@example.com");
+		const fetchSpy = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockResolvedValueOnce(goldReport)
+			.mockResolvedValue(null);
+		await storage.usage.reports();
+		const deadline = start + 24 * 60 * 60_000;
+
+		for (const elapsed of [6 * 60_000, 12 * 60 * 60_000, 24 * 60 * 60_000 - 1000]) {
+			now.mockReturnValue(start + elapsed);
+			expireCachePayloads(store);
+			const reports = anthropicReports(await storage.usage.reports());
+			expect(reports[0]?.fetchedAt).toBe(start);
+			expect(reports[0]?.metadata?.stale).toBe(true);
+			const reportEntry = [...store.cache].find(([key]) => key.startsWith("usage_cache:report:"))?.[1];
+			expect(reportEntry?.expiresAtSec).toBe(Math.floor(deadline / 1000));
+		}
+
+		// Even an active failure cooldown cannot keep the old snapshot alive.
+		now.mockReturnValue(deadline);
+		expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+		expect(fetchSpy).toHaveBeenCalledTimes(4);
+		now.mockReturnValue(deadline + 60 * 60_000);
+		expect(anthropicReports(await storage.usage.reports())).toEqual([]);
 	});
 
 	it("does not replay last-good quota after an explicit invalidation", async () => {
@@ -1268,6 +1314,246 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(fable.amount.used).toBeCloseTo(61);
 		expect(fable.amount.usedFraction).toBeCloseTo(0.61);
 		expect(fable.amount.remainingFraction).toBeCloseTo(0.39);
+	});
+});
+
+describe("AuthStorage Codex usage authentication recovery", () => {
+	let store: SqliteAuthCredentialStore;
+	let storage: AuthStorage;
+	let clock: number;
+	let initial: OAuthCredential;
+	let credentialId: number;
+	let status: number;
+	let acceptedBearer: string | undefined;
+	let usageBearers: string[];
+	let beforeRejection: (() => void) | undefined;
+	let refreshCalls: number;
+	let refreshHandler: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>;
+
+	beforeEach(async () => {
+		clock = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => clock);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		store = await SqliteAuthCredentialStore.open(":memory:");
+		initial = {
+			type: "oauth",
+			access: "rejected-access",
+			refresh: "initial-refresh",
+			expires: clock + 7 * 24 * 60 * 60_000,
+			accountId: "usage-account",
+			email: "usage@example.com",
+			authorizedAt: clock - 60_000,
+		};
+		status = 200;
+		acceptedBearer = "Bearer minted-access";
+		usageBearers = [];
+		beforeRejection = undefined;
+		refreshCalls = 0;
+		refreshHandler = async (provider, id, credential, _signal, reason) => {
+			expect(provider).toBe("openai-codex");
+			expect(id).toBe(credentialId);
+			expect(credential.refresh).toBe("initial-refresh");
+			expect(reason).toBe("auth-recovery");
+			return { ...credential, access: "minted-access", refresh: "minted-refresh" };
+		};
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? openaiCodexUsageProvider : undefined),
+			refreshOAuthCredential: async (...args) => {
+				refreshCalls += 1;
+				return refreshHandler(...args);
+			},
+			usageFetch: (async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.endsWith("/accounts/verified_access")) return Response.json({ programs: [] });
+				if (!url.endsWith("/wham/usage")) throw new Error(`unexpected usage URL: ${url}`);
+				const bearer = new Headers(init?.headers).get("Authorization") ?? "";
+				usageBearers.push(bearer);
+				if (status !== 200 && bearer !== acceptedBearer) {
+					beforeRejection?.();
+					return Response.json({ error: { code: "token_expired" } }, { status });
+				}
+				return Response.json({
+					plan_type: "team",
+					rate_limit: {
+						allowed: true,
+						limit_reached: false,
+						primary_window: { used_percent: 42, limit_window_seconds: 18_000 },
+					},
+				});
+			}) as typeof fetch,
+		});
+		await storage.credentials.set("openai-codex", [initial]);
+		credentialId = store.listAuthCredentials("openai-codex")[0]!.id;
+	});
+
+	afterEach(() => {
+		storage.close();
+		vi.restoreAllMocks();
+	});
+
+	async function rejectAfterCachedSuccess(nextStatus = 401): Promise<void> {
+		expect(await storage.usage.reports()).toHaveLength(1);
+		clock += 6 * 60_000;
+		status = nextStatus;
+		usageBearers.length = 0;
+	}
+
+	it("recovers once from a future-expiry 401 under the refresh lease and preserves row identity", async () => {
+		await rejectAfterCachedSuccess();
+		const lease = vi.spyOn(store, "tryAcquireCredentialRefreshLease");
+		const reports = await storage.usage.reports();
+
+		expect(usageBearers).toEqual(["Bearer rejected-access", "Bearer minted-access"]);
+		expect(refreshCalls).toBe(1);
+		expect(lease).toHaveBeenCalledTimes(1);
+		expect(reports).toHaveLength(1);
+		expect(reports?.[0]?.fetchedAt).toBe(clock);
+		expect(reports?.[0]?.metadata).not.toHaveProperty("stale");
+		expect(store.listAuthCredentials("openai-codex")).toMatchObject([
+			{
+				id: credentialId,
+				credential: { ...initial, access: "minted-access", refresh: "minted-refresh" },
+				disabledCause: null,
+			},
+		]);
+		expect(await storage.usage.reports()).toHaveLength(1);
+		expect(usageBearers).toHaveLength(2);
+	});
+
+	it("never disables a leased row when advisory near-expiry refresh fails definitively", async () => {
+		initial.expires = clock + 30_000;
+		store.updateAuthCredential(credentialId, initial);
+		await storage.credentials.reload();
+		refreshHandler = async () => {
+			throw new Error("400 invalid_grant: refresh token revoked");
+		};
+		const disable = vi.spyOn(store, "tryDisableAuthCredentialIfMatches");
+		const lease = vi.spyOn(store, "tryAcquireCredentialRefreshLease");
+
+		expect(await storage.usage.reports()).toHaveLength(1);
+		expect(refreshCalls).toBe(1);
+		expect(lease).toHaveBeenCalledTimes(1);
+		expect(disable).not.toHaveBeenCalled();
+		expect(usageBearers).toEqual(["Bearer rejected-access"]);
+		expect(store.listAuthCredentials("openai-codex")[0]?.disabledCause).toBeNull();
+	});
+
+	it("clears last-good on an unrecoverable 401 without disabling the credential", async () => {
+		await rejectAfterCachedSuccess();
+		refreshHandler = async () => {
+			throw new Error("400 invalid_grant: refresh token revoked");
+		};
+		const disable = vi.spyOn(store, "tryDisableAuthCredentialIfMatches");
+
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(refreshCalls).toBe(1);
+		expect(usageBearers).toEqual(["Bearer rejected-access"]);
+		expect(disable).not.toHaveBeenCalled();
+		expect(store.listAuthCredentials("openai-codex")).toMatchObject([
+			{ id: credentialId, credential: initial, disabledCause: null },
+		]);
+	});
+
+	it("does not retry recovery after the replacement bearer also receives 401", async () => {
+		await rejectAfterCachedSuccess();
+		acceptedBearer = undefined;
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(refreshCalls).toBe(1);
+		expect(usageBearers).toEqual(["Bearer rejected-access", "Bearer minted-access"]);
+		expect(store.listAuthCredentials("openai-codex")[0]?.disabledCause).toBeNull();
+	});
+
+	it("clears last-good on 403 without attempting token recovery", async () => {
+		await rejectAfterCachedSuccess(403);
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(await storage.usage.reports()).toEqual([]);
+		expect(refreshCalls).toBe(0);
+		expect(usageBearers).toEqual(["Bearer rejected-access"]);
+		expect(store.listAuthCredentials("openai-codex")[0]?.disabledCause).toBeNull();
+	});
+
+	it.each(["before-refresh", "during-refresh", "failed-refresh"])(
+		"adopts a peer-rotated bearer instead of overwriting it (%s)",
+		async timing => {
+			await rejectAfterCachedSuccess();
+			const peer = { ...initial, access: "peer-access", refresh: "peer-refresh" };
+			acceptedBearer = "Bearer peer-access";
+			if (timing === "before-refresh") {
+				beforeRejection = () => store.updateAuthCredential(credentialId, peer);
+			} else {
+				refreshHandler = async () => {
+					store.updateAuthCredential(credentialId, peer);
+					if (timing === "failed-refresh") throw new Error("400 invalid_grant: peer rotated");
+					return { ...initial, access: "losing-access", refresh: "losing-refresh" };
+				};
+			}
+
+			expect(await storage.usage.reports()).toHaveLength(1);
+			expect(usageBearers).toEqual(["Bearer rejected-access", "Bearer peer-access"]);
+			expect(refreshCalls).toBe(timing === "before-refresh" ? 0 : 1);
+			expect(store.listAuthCredentials("openai-codex")).toMatchObject([
+				{ id: credentialId, credential: peer, disabledCause: null },
+			]);
+		},
+	);
+
+	it("preserves stale quota and the polling cooldown for a transient 429", async () => {
+		const fetchedAt = clock;
+		await rejectAfterCachedSuccess(429);
+		const report = (await storage.usage.reports())?.[0];
+		expect(report?.fetchedAt).toBe(fetchedAt);
+		expect(report?.metadata?.stale).toBe(true);
+		expect(report?.limits[0]?.amount.used).toBe(42);
+		expect((await storage.usage.reports())?.[0]?.metadata?.stale).toBe(true);
+		expect(refreshCalls).toBe(0);
+		expect(usageBearers).toEqual(["Bearer rejected-access"]);
+	});
+});
+
+describe("AuthStorage broker-backed usage recovery", () => {
+	it("dispatches through the store hook and adopts its newer snapshot without an unguarded write", async () => {
+		const row = oauthRow(1, "broker@example.com");
+		if (row.credential.type !== "oauth") throw new Error("expected OAuth test credential");
+		row.provider = "openai-codex";
+		row.credential.refresh = REMOTE_REFRESH_SENTINEL;
+		const initial = row.credential;
+		const peer = { ...initial, access: "peer-access" };
+		const store = makeStore([row]);
+		const writes = vi.spyOn(store, "updateAuthCredential");
+		const refreshReasons: (string | undefined)[] = [];
+		store.refreshOAuthCredential = async (_provider, id, credential, _signal, reason) => {
+			expect(id).toBe(row.id);
+			expect(credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
+			refreshReasons.push(reason);
+			row.credential = peer;
+			return { ...initial, access: "obsolete-broker-reply" };
+		};
+		const usageBearers: (string | undefined)[] = [];
+		const provider: UsageProvider = {
+			id: "openai-codex",
+			async fetchUsage(params) {
+				usageBearers.push(params.credential.accessToken);
+				if (params.credential.accessToken !== peer.access) throw new ProviderHttpError("expired", 401);
+				return { provider: "openai-codex", fetchedAt: Date.now(), limits: [] };
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: id => (id === "openai-codex" ? provider : undefined),
+		});
+		try {
+			await storage.credentials.reload();
+			expect(await storage.usage.reports()).toHaveLength(1);
+			expect(usageBearers).toEqual([initial.access, peer.access]);
+			expect(refreshReasons).toEqual(["auth-recovery"]);
+			expect(row.credential).toEqual(peer);
+			expect(writes).not.toHaveBeenCalled();
+			expect(row.disabledCause).toBeNull();
+		} finally {
+			storage.close();
+			vi.restoreAllMocks();
+		}
 	});
 });
 

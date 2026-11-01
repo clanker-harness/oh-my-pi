@@ -86,6 +86,20 @@ describe("buildHeatmapLayout", () => {
 describe("buildProviderCards", () => {
 	const now = Date.now();
 
+	it("does not hide stale near-empty quota as untouched beside a fresh account", () => {
+		const stale = report("openai-codex", "old@example.test", [
+			limit("openai-codex", "old", "weekly", "Weekly", 0, "ok"),
+		]);
+		stale.fetchedAt = now - 3_600_000;
+		stale.metadata = { ...stale.metadata, stale: true };
+		const fresh = report("openai-codex", "fresh@example.test", [
+			limit("openai-codex", "fresh", "weekly", "Weekly", 0, "ok"),
+		]);
+		const card = buildProviderCards([fresh, stale], now)[0]!;
+		expect(card.idle).toBe(false);
+		expect(card.notes).toContain("old@example.test · stale · fetched 1h ago · last-known quota");
+	});
+
 	it("averages a window across accounts instead of showing the worst account", () => {
 		// One exhausted + one barely-used account: the classic report shows the
 		// aggregate (~50% free), so the card must not read 0% free.

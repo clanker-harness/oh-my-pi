@@ -36,11 +36,21 @@ export type ForcedUsageRefresh = { all: boolean; providers: Set<Provider> };
 /** Cached value and its logical expiry; used by UsageService. */
 export type UsageCacheEntry<T> = { value: T; expiresAt: number };
 
+/** A failed refresh must not renew the lifetime of the last successful snapshot. */
+function reportRetentionExpiresAt(value: unknown): number | undefined {
+	if (value === null || typeof value !== "object" || !("fetchedAt" in value)) return undefined;
+	return typeof value.fetchedAt === "number" && Number.isFinite(value.fetchedAt)
+		? value.fetchedAt + USAGE_LAST_GOOD_RETENTION_MS
+		: 0;
+}
+
 function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 	try {
 		const parsed = JSON.parse(raw) as { value?: T; expiresAt?: unknown };
 		const expiresAt = typeof parsed.expiresAt === "number" ? parsed.expiresAt : undefined;
 		if (!expiresAt || !Number.isFinite(expiresAt)) return undefined;
+		const retainedUntil = reportRetentionExpiresAt(parsed.value);
+		if (retainedUntil !== undefined && retainedUntil <= Date.now()) return undefined;
 		return { value: parsed.value as T, expiresAt };
 	} catch {
 		return undefined;

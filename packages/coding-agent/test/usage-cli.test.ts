@@ -77,6 +77,22 @@ function makeReport(provider: string, email: string, limits: UsageReport["limits
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
 
+it("labels transient fallback quota with its original age beside a fresh account", () => {
+	const now = Date.now();
+	const stale = makeReport("openai-codex", "old@example.test", [
+		makeLimit({ id: "weekly", provider: "openai-codex", usedFraction: 0.5 }),
+	]);
+	stale.fetchedAt = now - HOUR;
+	stale.metadata = { ...stale.metadata, stale: true };
+	const fresh = makeReport("openai-codex", "fresh@example.test", [
+		makeLimit({ id: "weekly", provider: "openai-codex", usedFraction: 0.1 }),
+	]);
+	const output = stripVTControlCharacters(formatUsageBreakdown([fresh, stale], [], now));
+	expect(output).toContain("stale · fetched 1h ago");
+	expect(output).toContain("old@example.test");
+	expect(output).toContain("fresh@example.test");
+});
+
 function codexResetReport(opts: {
 	nowMs: number;
 	accountId: string;

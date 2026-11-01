@@ -35,7 +35,11 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	collapseSharedUsageReports,
+	formatUsageFreshness,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
@@ -394,8 +398,10 @@ function formatAccountHeader(
 			header += chalk.dim(` · unavailable: ${reason}`);
 		}
 	}
-	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
-		header += chalk.dim(` · fetched ${formatDuration(nowMs - report.fetchedAt)} ago`);
+	if (report.metadata?.stale === true || (report.fetchedAt && nowMs - report.fetchedAt > 90_000)) {
+		header += (report.metadata?.stale === true ? chalk.yellow : chalk.dim)(
+			` · ${formatUsageFreshness([report], nowMs)}`,
+		);
 	}
 	return header;
 }
@@ -861,9 +867,8 @@ export function formatUsageBreakdown(
 	].sort((a, b) => a.localeCompare(b));
 
 	const lines: string[] = [];
-	const latestFetchedAt = Math.max(0, ...displayReports.map(report => report.fetchedAt ?? 0));
-	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
-	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
+	const freshness = formatUsageFreshness(displayReports, nowMs);
+	lines.push(`${chalk.bold("Usage")}${freshness ? chalk.dim(` · ${freshness}`) : ""}`);
 	const expiring = displayReports.flatMap(report => {
 		const warning = classifyResetExpiry(report, nowMs);
 		return warning?.tier === "imminent" ? [{ report, warning }] : [];
@@ -1642,6 +1647,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
+		await authStorage.usage.invalidate(cmd.provider?.toLowerCase());
 		const reports =
 			(await authStorage.usage.reports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),

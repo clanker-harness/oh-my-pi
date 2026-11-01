@@ -663,6 +663,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					);
 				}
 				ctx.logger?.warn("Codex usage request failed", { status: response.status, provider: params.provider });
+				if (response.status === 401 || response.status === 403) {
+					throw new ProviderHttpError(`Codex usage endpoint returned ${response.status}`, response.status);
+				}
 				return null;
 			}
 			payload = await response.json();

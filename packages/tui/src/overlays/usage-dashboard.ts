@@ -22,6 +22,7 @@ import { formatProviderName } from "../chrome/format";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
+	formatUsageFreshness,
 	summarizeUsageResetCredits,
 	type UsageResetSummary,
 } from "./usage-display";
@@ -41,7 +42,7 @@ import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { formatKeyHint } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
-import { col, elapsed, node, span, text } from "../native/describe";
+import { col, node, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, segmentedTabs } from "../native/overlay";
 
@@ -273,9 +274,17 @@ export function buildProviderCards(
 			unavailableAccounts: unavailable,
 			windows,
 			unlimited: windows.length === 0 && unavailable.length === 0,
-			notes: [...new Set(providerReports.flatMap(report => report.notes ?? []))],
+			notes: [
+				...new Set(providerReports.flatMap(report => report.notes ?? [])),
+				...providerReports
+					.filter(report => report.metadata?.stale === true)
+					.map(
+						(report, index) => `${reportAccountLabel(report, report.limits[0], index, nowMs)} · last-known quota`,
+					),
+			],
 			idle:
 				unavailable.length === 0 &&
+				!providerReports.some(report => report.metadata?.stale === true) &&
 				!resetCredits &&
 				daybreakAccounts.length === 0 &&
 				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
@@ -508,7 +517,12 @@ function leftSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
 }
 
 /** Stable, human account name for a report in the detail view. */
-function reportAccountLabel(report: UsageReport, limit: UsageLimit | undefined, index: number): string {
+function reportAccountLabel(
+	report: UsageReport,
+	limit: UsageLimit | undefined,
+	index: number,
+	nowMs = Date.now(),
+): string {
 	const metadata = report.metadata;
 	const pick = (value: unknown): string | undefined => (typeof value === "string" && value ? value : undefined);
 	const identity =
@@ -518,7 +532,8 @@ function reportAccountLabel(report: UsageReport, limit: UsageLimit | undefined, 
 		pick(limit?.scope.projectId) ??
 		`account ${index + 1}`;
 	const org = pick(metadata?.orgName);
-	return sanitizeDisplayLine(org && org !== identity ? `${identity} (${org})` : identity);
+	const label = sanitizeDisplayLine(org && org !== identity ? `${identity} (${org})` : identity);
+	return report.metadata?.stale === true ? `${label} · ${formatUsageFreshness([report], nowMs)}` : label;
 }
 
 /** Window qualifier worth showing after a limit title (none when the title already names it). */
@@ -1043,12 +1058,7 @@ export class UsageDashboardComponent implements Component {
 		const maxScroll = Math.max(0, contentSource.length - contentRows);
 		if (this.#scroll > maxScroll) this.#scroll = maxScroll;
 
-		const latestFetchedAt = Math.max(0, ...this.#reports.map(report => report.fetchedAt ?? 0));
-		const checkedText = this.#refreshing
-			? "refreshing…"
-			: latestFetchedAt
-				? `checked ${formatDuration(this.#nowMs - latestFetchedAt)} ago`
-				: "";
+		const checkedText = this.#refreshing ? "refreshing…" : formatUsageFreshness(this.#reports, this.#nowMs);
 		const title = this.#view === "detail" ? "Usage · Details" : "Usage";
 
 		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")} scroll · ` : "";
@@ -1117,7 +1127,7 @@ export class UsageDashboardComponent implements Component {
 	/** The toolbar: the two views as a segmented control, then how fresh the reports are and Refresh. */
 	#describeHead(): NativeNode {
 		const checked: NativeChild[] = [];
-		const latestFetchedAt = Math.max(0, ...this.#reports.map(report => report.fetchedAt ?? 0));
+		const freshness = formatUsageFreshness(this.#reports);
 		if (this.#refreshing) {
 			checked.push(node("spinner", { style: "dots", label: [span("Refreshing…", "dim")] }));
 		} else if (this.#refreshError) {
@@ -1127,11 +1137,9 @@ export class UsageDashboardComponent implements Component {
 					title: sanitizeDisplayLine(this.#refreshError),
 				}),
 			);
-		} else if (latestFetchedAt) {
+		} else if (freshness) {
 			checked.push(
-				text([span("Updated", "dim")]),
-				elapsed(Date.now() - latestFetchedAt),
-				text([span("ago", "dim")]),
+				text([span(freshness, this.#reports.some(report => report.metadata?.stale === true) ? "warning" : "dim")]),
 			);
 		}
 		const children: NativeChild[] = [

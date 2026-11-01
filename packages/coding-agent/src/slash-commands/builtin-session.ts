@@ -29,7 +29,11 @@ import {
 	toResetUsageAccounts,
 } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
-import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import { loadSessionPinUsage, matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
+import {
+	describeSessionPinUsage,
+	describeSessionPinUsageWindows,
+} from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import {
 	launchStatsDashboard,
 	parseStatsDashboardArgs,
@@ -153,8 +157,16 @@ async function handleSessionPinCommand(
 	const selector = arg.trim();
 	if (!selector) {
 		const lines = [`OAuth accounts for ${providerName}:`];
-		for (const account of accounts) {
-			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
+		const usage = await loadSessionPinUsage(session, accountList.provider);
+		for (const account of toSessionPinAccounts(accountList.accounts, usage)) {
+			const quota = account.usage
+				? [describeSessionPinUsage(account.usage), ...describeSessionPinUsageWindows(account.usage)]
+						.map(part => part.text)
+						.join(" · ")
+				: undefined;
+			lines.push(
+				`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}${quota ? ` — ${quota}` : ""}`,
+			);
 		}
 		lines.push("", "Pin one with `/session pin <number|email|account id>`.");
 		await output(lines.join("\n"));
@@ -175,7 +187,7 @@ async function handleSessionPinCommand(
 		return;
 	}
 	const account = matches[0];
-	if (!account || !session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+	if (!account || !session.pinOAuthAccount(accountList.provider, account.credentialId)) {
 		await output(`${account?.label ?? selector} is no longer available to pin.`);
 		return;
 	}

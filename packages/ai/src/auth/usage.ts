@@ -227,20 +227,13 @@ export class UsageService implements UsageApi {
 						request.provider,
 						request.credential,
 					);
-					const refreshed = await this.#deps.refresher.refresh(
+					const refreshed = await this.#deps.refresher.refreshForUsage(
 						request.provider,
 						refreshableCredential,
 						refreshableCredentialId,
 						timeoutSignal,
-						"usage-probe",
 					);
 					const refreshedCredential = mergeRefreshedUsageCredential(request.credential, refreshed);
-					this.persistRefreshedCredential(
-						request.provider,
-						request.credential,
-						refreshedCredential,
-						refreshableCredentialId,
-					);
 					params = {
 						...request,
 						credential: refreshedCredential,
@@ -276,11 +269,45 @@ export class UsageService implements UsageApi {
 			const previousReport = this.#deps.cache.getStale<UsageReport | null>(
 				this.#deps.cache.reportKey(request),
 			)?.value;
-			const report = await providerImpl.fetchUsage(params, {
-				fetch: this.fetch,
-				logger: this.logger,
-				...(previousReport ? { previousReport } : {}),
-			});
+			let report: UsageReport | null;
+			try {
+				report = await providerImpl.fetchUsage(params, {
+					fetch: this.fetch,
+					logger: this.logger,
+					...(previousReport ? { previousReport } : {}),
+				});
+			} catch (error) {
+				if (
+					request.provider !== "openai-codex" ||
+					params.credential.type !== "oauth" ||
+					!(error instanceof AIError.ProviderHttpError) ||
+					error.status !== 401
+				) {
+					throw error;
+				}
+				// A rejected bearer invalidates its quota even if its recorded expiry
+				// is in the future. Recovery is bounded to one exchange/adoption and
+				// one probe; neither a failed exchange nor a failed retry can replay it.
+				this.#deps.cache.set(this.#deps.cache.reportKey(request), { value: null, expiresAt: 0 });
+				const refreshable = buildRefreshableOauthCredential(params.credential);
+				if (!refreshable) throw error;
+				const credentialId = this.#deps.pool.findIdForUsageCredential(request.provider, params.credential);
+				const refreshed = await this.#deps.refresher.refreshForUsage(
+					request.provider,
+					refreshable,
+					credentialId,
+					timeoutSignal,
+					true,
+				);
+				const credential = mergeRefreshedUsageCredential(params.credential, refreshed);
+				params = { ...params, credential, accountKey: usageCacheIdentity(credential) };
+				report = await providerImpl.fetchUsage(params, { fetch: this.fetch, logger: this.logger });
+			}
+			if (report?.metadata?.stale !== undefined) {
+				const metadata = { ...report.metadata };
+				delete metadata.stale;
+				report = { ...report, metadata };
+			}
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
 			// orgId from the `anthropic-organization-id` response header but never
@@ -336,7 +363,8 @@ export class UsageService implements UsageApi {
 
 		const failure = this.#deps.cache.get<null>(failureKey);
 		if (failure && failure.expiresAt > now) {
-			return this.#deps.cache.lastGood(cacheKey);
+			const lastGood = this.#deps.cache.lastGood(cacheKey);
+			return lastGood ? { ...lastGood, metadata: { ...lastGood.metadata, stale: true } } : null;
 		}
 
 		// Invalidation must not fork an already-running credential probe. Share it;
@@ -380,7 +408,8 @@ export class UsageService implements UsageApi {
 			// so an expired login does not display stale quota indefinitely.
 			const providerImpl = this.providerFor(request.provider);
 			const retainLastGood = !invalidated && providerImpl?.retainLastGoodOnFailure !== false;
-			const lastGood = retainLastGood ? this.#deps.cache.lastGood(cacheKey) : null;
+			const previous = retainLastGood ? this.#deps.cache.lastGood(cacheKey) : null;
+			const lastGood = previous ? { ...previous, metadata: { ...previous.metadata, stale: true } } : null;
 			const failureBackoffMs = providerImpl?.failureBackoffMs ?? USAGE_FAILURE_BACKOFF_MS;
 			const backoffJitter = failureBackoffMs * (Math.random() * 0.5 - 0.25);
 			const coolDown = Date.now() + failureBackoffMs + backoffJitter;

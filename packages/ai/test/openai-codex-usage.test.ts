@@ -53,6 +53,45 @@ function fakeFetch(payload: unknown): FetchImpl {
 }
 
 describe("openai-codex usage parser", () => {
+	it.each([401, 403])("propagates usage authentication failures with status %s", async status => {
+		const fetchImpl = (async () => new Response("rejected", { status })) as FetchImpl;
+		const request = openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					accessToken: accessTokenFixture,
+					expiresAt: Date.now() + 7 * 24 * 60 * 60_000,
+				},
+			},
+			{ fetch: fetchImpl },
+		);
+		await expect(request).rejects.toBeInstanceOf(ProviderHttpError);
+		await expect(request).rejects.toMatchObject({ status });
+	});
+
+	it.each([429, 500])("keeps transient HTTP %s failures eligible for last-good fallback", async status => {
+		const fetchImpl = (async () => new Response("temporarily unavailable", { status })) as FetchImpl;
+		expect(
+			await openaiCodexUsageProvider.fetchUsage(
+				{ provider: "openai-codex", credential: { type: "oauth", accessToken: accessTokenFixture } },
+				{ fetch: fetchImpl },
+			),
+		).toBeNull();
+	});
+
+	it("keeps network failures eligible for last-good fallback", async () => {
+		const fetchImpl = (async () => {
+			throw new Error("ECONNRESET");
+		}) as FetchImpl;
+		expect(
+			await openaiCodexUsageProvider.fetchUsage(
+				{ provider: "openai-codex", credential: { type: "oauth", accessToken: accessTokenFixture } },
+				{ fetch: fetchImpl },
+			),
+		).toBeNull();
+	});
+
 	it("reports active cyber access without letting a failed entitlement request hide usage", async () => {
 		for (const status of [200, 500]) {
 			const requests: string[] = [];

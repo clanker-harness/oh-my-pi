@@ -1,5 +1,5 @@
-import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { CredentialsApi, KeysApi, OAuthApi } from "@oh-my-pi/pi-ai";
+import { getOAuthCredentialProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	Container,
@@ -26,10 +26,11 @@ import { isNativeRendering } from "../native/state";
 
 const OAUTH_SELECTOR_MAX_VISIBLE = 10;
 
-/** Credential presence and provenance needed by the provider picker. */
+/** Credential presence, provenance, and stored accounts needed by the provider picker. */
 export interface OAuthSelectorAuthSource {
 	readonly credentials: Pick<CredentialsApi, "has">;
 	readonly keys: Pick<KeysApi, "source">;
+	readonly oauth: Pick<OAuthApi, "accounts">;
 }
 
 /**
@@ -288,11 +289,17 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			return theme.fg("error", ` ${theme.status.error} invalid`) + source;
 		}
 		if (state === "valid") {
-			return theme.fg("success", ` ${theme.status.enabled} logged in`) + source;
+			return theme.fg("success", ` ${theme.status.enabled} ${this.#signedInLabel(providerId)}`) + source;
 		}
 		return this.#hasSelectableAuth(providerId)
-			? theme.fg("success", ` ${theme.status.enabled} logged in`) + source
+			? theme.fg("success", ` ${theme.status.enabled} ${this.#signedInLabel(providerId)}`) + source
 			: "";
+	}
+
+	/** "logged in", or "N accounts" once a provider stores several OAuth accounts. */
+	#signedInLabel(providerId: string, fallback = "logged in"): string {
+		const count = this.#authStorage.oauth.accounts(getOAuthCredentialProvider(providerId)).length;
+		return count > 1 ? `${count} accounts` : fallback;
 	}
 
 	#isSearchEnabled(): boolean {
@@ -486,7 +493,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		if (state === "checking") return { value: [span("checking", "warning", { fx: "pulse" })], detail };
 		if (state === "invalid") return { value: [span("invalid", "error")], detail };
 		if (state === "valid" || this.#hasSelectableAuth(providerId)) {
-			return { value: [span("logged in", "success")], detail };
+			return { value: [span(this.#signedInLabel(providerId), "success")], detail };
 		}
 		return { detail };
 	}
@@ -511,7 +518,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const detail = !source
 			? "Not configured"
 			: origin?.kind === "oauth"
-				? `Signed in · ${source}`
+				? `Signed in · ${this.#signedInLabel(provider.id, source)}`
 				: `API key · ${source}`;
 		const initials = provider.name
 			.split(/[^\p{L}\p{N}]+/u)

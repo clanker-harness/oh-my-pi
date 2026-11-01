@@ -110,7 +110,7 @@ describe("session account picker", () => {
 		{ position: 1, credentialId: 12, email: "b@x.so", label: "b@x.so", active: true },
 	];
 
-	it("checks the active account, details the org, and pins on confirm", () => {
+	it("checks the active account, details the org, and uses it on confirm", () => {
 		const picked: number[] = [];
 		const selector = new SessionAccountSelectorComponent(
 			"Anthropic",
@@ -122,12 +122,29 @@ describe("session account picker", () => {
 		expect(p.current).toEqual(["12"]);
 		expect(p.selected).toBe("12");
 		expect(p.items?.find(item => item.id === "11")?.detail).toBe("Acme");
-		expect(p.actions?.map(a => a.label)).toEqual(["Pin", "Close"]);
+		expect(p.items?.map(item => item.id)).toEqual(["11", "12"]);
+		expect(p.actions?.map(a => a.label)).toEqual(["Use", "Close"]);
 		selector.handleNativeEvent(at("select", "11"));
 		selector.handleNativeEvent(act("confirm"));
 		selector.handleNativeEvent(act("close"));
 		expect(picked).toEqual([11, -1]);
 		expect(selector.describe(genericCx)?.c?.[0]).not.toMatchObject({ k: "picker" });
+	});
+
+	it("routes the add and sign-out rows to their actions, never to account selection", () => {
+		const log: string[] = [];
+		const selector = new SessionAccountSelectorComponent(
+			"Anthropic",
+			accounts,
+			account => log.push(`use ${account.credentialId}`),
+			() => log.push("cancel"),
+			{ onAddAccount: () => log.push("add"), onSignOut: () => log.push("sign out") },
+		);
+		selector.handleNativeEvent(at("select", "add-account"));
+		expect(sheet(selector.describe(pickerCx)).props.actions?.[0]?.label).toBe("Sign in");
+		selector.handleNativeEvent(act("confirm"));
+		selector.handleNativeEvent(at("activate", "sign-out"));
+		expect(log).toEqual(["add", "sign out"]);
 	});
 });
 
@@ -221,6 +238,7 @@ describe("oauth selector picker", () => {
 	const auth: OAuthSelectorAuthSource = {
 		credentials: { has: (id: string) => id === signedIn },
 		keys: { source: (id: string) => (id === signedIn ? { kind: "oauth" } : undefined) } as never,
+		oauth: { accounts: () => [] },
 	};
 
 	it("cards with auth-state dots and origin detail; typing keeps the catalogue", () => {
@@ -255,5 +273,21 @@ describe("oauth selector picker", () => {
 		selector.handleNativeEvent(at("activate", target));
 		selector.handleNativeEvent(act("close"));
 		expect(log).toEqual([target, "cancel"]);
+	});
+
+	it("counts the accounts a provider stores once it holds several", () => {
+		const twoAccounts = [
+			{ position: 0, credentialId: 1, active: false },
+			{ position: 1, credentialId: 2, active: false },
+		];
+		const selector = new OAuthSelectorComponent(
+			"login",
+			{ ...auth, oauth: { accounts: (id: string) => (id === signedIn ? twoAccounts : []) } },
+			() => {},
+			() => {},
+		);
+		const row = sheet(selector.describe(pickerCx)).props.items?.find(item => item.id === signedIn);
+		expect(row?.detail).toBe("Signed in · 2 accounts");
+		expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("2 accounts");
 	});
 });

@@ -826,6 +826,21 @@ export class OAuthRefresher {
 					};
 				}
 			} else {
+				// Broker-backed stores can update their snapshot during the hook.
+				// Without a store CAS, adopt that current row rather than overwrite it
+				// with a response based on the pre-exchange snapshot.
+				const latest = this.#deps.store.listAuthCredentials(provider).find(entry => entry.id === row.id);
+				if (!latest || serializeCredential(provider, latest.credential)?.data !== serializedData) {
+					await this.#deps.pool.reload();
+					const adopted = this.#deps.pool.entries(provider).find(entry => entry.id === row.id)?.credential;
+					return {
+						result: {
+							credential: adopted?.type === "oauth" ? options.credentialFromRow(adopted) : undefined,
+							refreshed: false,
+							removed: false,
+						},
+					};
+				}
 				this.#deps.store.updateAuthCredential(row.id, merged);
 			}
 			saved = true;
@@ -931,6 +946,69 @@ export class OAuthRefresher {
 			if (recent && recent.credential.access !== rejectedAccess) return Promise.resolve(recent.credential);
 		}
 		return this.#track(this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess));
+	}
+
+	/** Advisory refresh: share ownership and CAS, but never disable a credential for a failed usage probe. */
+	async refreshForUsage(
+		provider: Provider,
+		credential: OAuthCredential,
+		credentialId: number | undefined,
+		signal?: AbortSignal,
+		forceRefresh = false,
+	): Promise<OAuthCredentials> {
+		if (credentialId === undefined) {
+			return this.#requestOAuthCredentialRefresh(
+				provider,
+				credential,
+				undefined,
+				signal,
+				forceRefresh ? "auth-recovery" : "usage-probe",
+				undefined,
+			);
+		}
+		const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
+		if (existing) return raceSignal(existing, signal, "usage credential refresh aborted");
+		const promise = (async () => {
+			try {
+				const result = await this.refreshStored(provider, {
+					credentialId,
+					observedCredential: credential,
+					credentialFromRow: row => row,
+					forceRefresh,
+					signal,
+					refresh: (current, refreshSignal) =>
+						this.#requestOAuthCredentialRefresh(
+							provider,
+							current,
+							credentialId,
+							signal && refreshSignal ? AbortSignal.any([signal, refreshSignal]) : (signal ?? refreshSignal),
+							forceRefresh ? "auth-recovery" : "usage-probe",
+							undefined,
+						),
+				});
+				if (result.credential && result.credential.expires > Date.now()) return result.credential;
+				throw new AIError.OAuthError(
+					`Usage refresh did not produce a usable credential for provider: ${provider}`,
+					{
+						kind: "token-refresh",
+						provider,
+					},
+				);
+			} catch (error) {
+				// A peer can rotate while our exchange fails (including invalid_grant).
+				// Adopt its bearer, but never write our attempted token back over it.
+				await this.#deps.pool.reload();
+				const current = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+				if (current?.type === "oauth" && current.access !== credential.access && current.expires > Date.now()) {
+					return current;
+				}
+				throw error;
+			}
+		})().finally(() => {
+			this.#oauthCredentialRefreshInFlight.delete(credentialId);
+		});
+		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
+		return raceSignal(promise, signal, "usage credential refresh aborted");
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */

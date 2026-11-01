@@ -64,7 +64,9 @@ import type {
 	Message,
 	MessageAttribution,
 	Model,
+	ModelUsageHealth,
 	OAuthAccountIdentity,
+	OAuthAccountSummary,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -538,6 +540,7 @@ import {
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
 	cfgSampling,
 	cfgSkillful,
 	cfgTierAdvisor,
@@ -4401,7 +4404,12 @@ export class AgentSession implements SettingsScope {
 		return true;
 	}
 
-	/** Re-seed the rate meter from the last completed assistant turn after a conversation swap (resume, branch switch). */
+	/**
+	 * Re-seed the rate meter from the last completed assistant turn after a
+	 * conversation swap (resume, branch switch). Like the live meter, it times
+	 * from the first token: the wait before it (queueing, model load, prefill)
+	 * is not generation.
+	 */
 	#reseedTokenRate(): void {
 		const messages = this.agent.state.messages;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -4409,7 +4417,8 @@ export class AgentSession implements SettingsScope {
 			if (message?.role !== "assistant") continue;
 			const assistant = message as AssistantMessage;
 			if (assistant.duration === undefined) continue;
-			this.tokenRate.seed(assistant.usage.output, assistant.duration);
+			const ttft = assistant.ttft !== undefined && assistant.ttft < assistant.duration ? assistant.ttft : 0;
+			this.tokenRate.seed(assistant.usage.output, assistant.duration - ttft);
 			return;
 		}
 		this.tokenRate.reset();
@@ -4648,10 +4657,10 @@ export class AgentSession implements SettingsScope {
 
 		// Meter generation per session: each session tracks its own stream, so a
 		// background subagent holds a live reading by the time it is focused and
-		// the main session's reading survives focus round-trips.
-		if (event.type === "message_start" && event.message.role === "assistant") {
-			this.tokenRate.begin(event.message.timestamp);
-		} else if (event.type === "message_update" && event.message.role === "assistant") {
+		// the main session's reading survives focus round-trips. The clock opens on
+		// the first streamed delta (push), not at request start, so queueing,
+		// model loads and prompt prefill never read as slow generation.
+		if (event.type === "message_update" && event.message.role === "assistant") {
 			const delta = event.assistantMessageEvent;
 			if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
 				this.tokenRate.push(delta.delta);
@@ -14343,22 +14352,40 @@ export class AgentSession implements SettingsScope {
 	async listCurrentProviderOAuthAccounts(): Promise<SessionOAuthAccountList | undefined> {
 		const provider = this.model?.provider;
 		if (!provider) return undefined;
+		return { provider, accounts: await this.listOAuthAccounts(provider) };
+	}
+
+	/** List `provider`'s stored OAuth accounts, rereading the store, and mark this session's active account. */
+	async listOAuthAccounts(provider: string): Promise<OAuthAccountSummary[]> {
 		const authStorage = this.#modelRegistry.authStorage;
 		await authStorage.credentials.reload();
-		return {
-			provider,
-			accounts: authStorage.oauth.accounts(provider, this.sessionId),
-		};
+		return authStorage.oauth.accounts(provider, this.sessionId);
 	}
 
 	/**
-	 * Pin a stored OAuth account to the current model provider for this session.
+	 * Pin a stored OAuth account of `provider` to this session.
 	 * Returns false while streaming or when the credential is no longer available.
 	 */
-	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
-		const provider = this.model?.provider;
-		if (!provider || this.isStreaming) return false;
+	pinOAuthAccount(provider: string, credentialId: number): boolean {
+		if (this.isStreaming) return false;
 		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+	}
+
+	/**
+	 * Usage health of every stored `provider` account, as the account router
+	 * sees it: quota windows, the usage reserve, plan gates, and local
+	 * rate-limit blocks. Scoped to the current model when it belongs to
+	 * `provider`, otherwise to the provider's account-wide limits.
+	 */
+	async getAccountUsage(provider: string, signal?: AbortSignal): Promise<ModelUsageHealth> {
+		const model = this.model?.provider === provider ? this.model : undefined;
+		return this.#modelRegistry.authStorage.health.model(provider, {
+			modelId: model?.id,
+			baseUrl: model ? model.baseUrl : this.#modelRegistry.getProviderBaseUrl?.(provider),
+			sessionId: this.sessionId,
+			reserveFraction: cfgRetryUsageReservePct.get(this.settings) / 100,
+			signal,
+		});
 	}
 
 	/**

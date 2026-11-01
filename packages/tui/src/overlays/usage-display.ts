@@ -1,4 +1,14 @@
 import type { UsageLimit, UsageReport, UsageResetCreditDetail, UsageResetCredits } from "@oh-my-pi/pi-ai";
+import { formatDuration } from "@oh-my-pi/pi-utils";
+
+/** Age of the oldest snapshot; failed refreshes must not look like live quota. */
+export function formatUsageFreshness(reports: readonly UsageReport[], nowMs = Date.now()): string {
+	const stale = reports.some(report => report.metadata?.stale === true);
+	const snapshots = stale ? reports.filter(report => report.metadata?.stale === true) : reports;
+	const fetchedAt = snapshots.reduce((oldest, report) => Math.min(oldest, report.fetchedAt), Infinity);
+	const age = Number.isFinite(fetchedAt) ? `fetched ${formatDuration(Math.max(0, nowMs - fetchedAt))} ago` : "";
+	return [stale ? "stale" : "", age].filter(Boolean).join(" · ");
+}
 
 /** Include the usage tier in a limit title unless its label already names it. */
 export function formatLimitTitle(limit: UsageLimit): string {

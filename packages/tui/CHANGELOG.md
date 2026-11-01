@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed fullscreen drag-copy breaking wrapped lines: rows the renderer soft-wrapped now paste as their original single line (continuation indent dropped, the space at the break restored), so copied sentences no longer arrive with stray newlines that browser fields turn into glued words like `activationsteering`.
+- Account pickers and usage dashboards distinguish stale, last-known quota from current reports and show snapshot age; a fresh sibling account no longer makes older reports appear freshly checked.
 
 ## [18.15.0] - 2026-11-01
 

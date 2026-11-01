@@ -147,9 +147,10 @@ class DecayedSums {
  * history. Additive, not multiplicative: a fast burst of visible tokens is
  * never amplified by what earlier messages hid.
  *
- * Stream time runs from {@link begin} to {@link end}; callers pass the
- * message's own request-start timestamp and `timestamp + duration` (epoch ms,
- * the `Date.now()` clock) so dispatch latency never shortens a span. Tool
+ * Stream time runs from the message's open to {@link end}. `AgentSession`
+ * opens it on the first streamed delta ({@link push}), so queueing, model
+ * loads and prompt prefill before the first token never count as generation
+ * time; {@link begin} opens it explicitly at a given wall time. Tool
  * execution between messages neither ages the sums nor counts as time, so the
  * readout holds across it. Each `AgentSession` owns one meter, so background
  * subagents keep their own reading; {@link seed} restores it from the last

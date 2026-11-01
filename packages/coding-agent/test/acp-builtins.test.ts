@@ -76,6 +76,7 @@ interface FakeAcpBuiltinSession {
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	scopedModels: Array<{ model: { provider: string; id: string } }>;
 	modelRegistry: {
+		authStorage: { usage: { invalidate(): Promise<void> } };
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	};
@@ -185,6 +186,7 @@ function createRuntime() {
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		scopedModels: [],
 		modelRegistry: {
+			authStorage: { usage: { invalidate: async () => {} } },
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
 		},

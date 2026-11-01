@@ -16,6 +16,33 @@ describe("renderUsageReports content", () => {
 		setThemeInstance(darkTheme);
 	});
 
+	it("identifies an old fallback separately from fresh sibling quota", () => {
+		const now = Date.now();
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "fresh@example.test" },
+			},
+			{
+				provider: "openai-codex",
+				fetchedAt: now - 3_600_000,
+				limits: [
+					{
+						id: "weekly",
+						label: "Weekly",
+						scope: { provider: "openai-codex" },
+						amount: { usedFraction: 0.25, unit: "percent" },
+					},
+				],
+				metadata: { email: "old@example.test", stale: true },
+			},
+		];
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, now, 120));
+		expect(output).toContain("old@example.test: stale · fetched 1h ago · last-known quota");
+		expect(output).toContain("75% free");
+	});
 	it("renders bars and free percentage for limits that only report remainingFraction", () => {
 		const reports: UsageReport[] = [
 			{
@@ -429,6 +456,34 @@ describe("interactive /usage account visibility", () => {
 
 		expect(warnings).toEqual([expect.stringContaining("not configured")]);
 		expect(mounted).toBeUndefined();
+	});
+
+	it("opens explicit usage with fresh quota instead of the background cache", async () => {
+		let usedFraction = 0.1;
+		authStorage.usage.setProvider("anthropic", {
+			id: "anthropic",
+			fetchUsage: async () => ({
+				provider: "anthropic",
+				fetchedAt: now,
+				metadata: { email, accountId: "shared-account", orgId: "org-team" },
+				limits: [
+					{
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						scope: { provider: "anthropic", windowId: "5h" },
+						amount: { usedFraction, unit: "percent" },
+					},
+				],
+			}),
+		});
+		authStorage.usage.setProvider("tavily", { id: "tavily", fetchUsage: async () => null });
+		await authStorage.usage.reports();
+		usedFraction = 0.9;
+
+		await command(() => authStorage.usage.reports()).handleUsageCommand();
+
+		expect(display()).toContain("10%");
+		expect(display()).not.toContain("90%");
 	});
 
 	it("keeps a missing Claude subscription visible beside its same-email sibling's real usage", async () => {

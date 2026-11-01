@@ -1,7 +1,11 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	collapseSharedUsageReports,
+	formatUsageFreshness,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -58,8 +62,8 @@ function renderUsageReports(
 	usageModelSelectors: readonly string[] = [],
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
-	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
-	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
+	const freshness = formatUsageFreshness(displayReports, nowMs);
+	const lines = [`Usage${freshness ? ` (${freshness})` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const providerReports = grouped.get(report.provider) ?? [];
@@ -83,6 +87,12 @@ function renderUsageReports(
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
 		for (const report of providerReports) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
+			if (report.metadata?.stale === true) {
+				const identity = report.metadata.email ?? report.metadata.accountId ?? "account";
+				lines.push(
+					`  ${sanitizeText(String(identity))}: ${formatUsageFreshness([report], nowMs)} · last-known quota`,
+				);
+			}
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (resets && resets.bankedCount > 0) {
 				const resetIdentity =
@@ -170,6 +180,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
 	};
 	if (provider.fetchUsageReports) {
+		await runtime.session.modelRegistry.authStorage.usage.invalidate();
 		const reports = await provider.fetchUsageReports();
 		if (reports && reports.length > 0) {
 			const currentProvider = runtime.session.model?.provider;

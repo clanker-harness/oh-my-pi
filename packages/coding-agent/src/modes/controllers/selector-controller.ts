@@ -57,7 +57,11 @@ import type {
 	SessionPickHandler,
 } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
-import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
+import type {
+	OAuthAccountSummary,
+	ResetCreditAccountStatus,
+	ResetCreditRedeemOutcome,
+} from "../../session/auth-storage";
 import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
@@ -76,7 +80,7 @@ import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { loadSessionPinUsage, toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -462,7 +466,10 @@ export class SelectorController {
 					unavailableAccounts,
 				),
 			loadActivity: loadDailyActivity,
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				await authStorage.usage.invalidate();
+				return this.ctx.session.fetchUsageReports();
+			},
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});
@@ -2302,7 +2309,7 @@ export class SelectorController {
 	async showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		if (providerId) {
 			if (mode === "login") {
-				await this.#handleOAuthLogin(providerId);
+				await this.#showProviderLogin(providerId);
 			} else {
 				await this.#showOAuthLogoutAccountSelector(providerId);
 			}
@@ -2330,7 +2337,7 @@ export class SelectorController {
 					selector.stopValidation();
 					done();
 					if (mode === "login") {
-						await this.#handleOAuthLogin(selectedProviderId);
+						await this.#showProviderLogin(selectedProviderId);
 					} else {
 						await this.#showOAuthLogoutAccountSelector(selectedProviderId);
 					}
@@ -2358,6 +2365,28 @@ export class SelectorController {
 		});
 	}
 
+	/**
+	 * `/login` for one provider: open its account manager when accounts are
+	 * stored, otherwise sign in straight away.
+	 */
+	async #showProviderLogin(loginProviderId: string): Promise<void> {
+		const provider = (await loadProviderAuthUi()).getOAuthCredentialProvider(loginProviderId);
+		let accounts: OAuthAccountSummary[];
+		try {
+			accounts = await this.ctx.session.listOAuthAccounts(provider);
+		} catch (error) {
+			this.ctx.showError(
+				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		if (accounts.length === 0) {
+			await this.#handleOAuthLogin(loginProviderId);
+			return;
+		}
+		await this.#showAccountManager(provider, loginProviderId, accounts);
+	}
+
 	async showSessionPinSelector(): Promise<void> {
 		const session = this.ctx.session;
 		if (session.isStreaming) {
@@ -2379,10 +2408,9 @@ export class SelectorController {
 			return;
 		}
 		const { getOAuthProviders } = await loadProviderAuthUi();
-		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-		const providerName = provider?.name ?? accountList.provider;
-		const accounts = toSessionPinAccounts(accountList.accounts);
-		if (accounts.length === 0) {
+		const loginProvider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
+		if (accountList.accounts.length === 0) {
+			const providerName = loginProvider?.name ?? accountList.provider;
 			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
 			this.ctx.showStatus(
 				source
@@ -2391,24 +2419,63 @@ export class SelectorController {
 			);
 			return;
 		}
+		await this.#showAccountManager(accountList.provider, loginProvider?.id, accountList.accounts);
+	}
 
+	/**
+	 * Account manager for `provider`, shared by `/login <provider>` and
+	 * `/session pin`: use a stored account for this session, sign in to another
+	 * one (when `loginProviderId` names its login flow), or sign one out. A
+	 * sign-in started here reopens the manager so the new account can be picked.
+	 */
+	async #showAccountManager(
+		provider: string,
+		loginProviderId: string | undefined,
+		summaries: readonly OAuthAccountSummary[],
+	): Promise<void> {
+		const session = this.ctx.session;
+		this.ctx.showStatus("Checking account usage…", { dim: true });
+		const accounts = toSessionPinAccounts(summaries, await loadSessionPinUsage(session, provider));
+		const { getOAuthProviders } = await loadProviderAuthUi();
+		const providerName =
+			getOAuthProviders().find(candidate => candidate.id === (loginProviderId ?? provider))?.name ?? provider;
 		this.showSelector(done => {
 			const selector = new SessionAccountSelectorComponent(
 				providerName,
 				accounts,
 				account => {
 					done();
-					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
-						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
+					if (session.isStreaming) {
+						this.ctx.showWarning("Cannot switch accounts while the session is streaming.");
 						return;
 					}
-					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					if (!session.pinOAuthAccount(provider, account.credentialId)) {
+						this.ctx.showWarning(`${account.label} is no longer available.`);
+						return;
+					}
+					this.ctx.showStatus(`Using ${account.label} for ${providerName} in this session.`);
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender();
 				},
 				() => {
 					done();
 					this.ctx.ui.requestRender();
+				},
+				{
+					...(loginProviderId
+						? {
+								onAddAccount: () => {
+									done();
+									void this.#handleOAuthLogin(loginProviderId).then(added =>
+										added ? this.#showProviderLogin(loginProviderId) : undefined,
+									);
+								},
+							}
+						: {}),
+					onSignOut: () => {
+						done();
+						void this.#showOAuthLogoutAccountSelector(loginProviderId ?? provider);
+					},
 				},
 			);
 			return { component: selector, focus: selector };

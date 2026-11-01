@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 
@@ -75,4 +76,43 @@ test.each([
 	expect(stderr).toBe("");
 	expect(stdout).toBe(`Invalidated cached usage reports for provider "${provider}".\n`);
 	expect(process.exitCode).toBe(0);
+});
+
+test.each([undefined, "groq"])("omp usage refreshes cached quota for scope %s", async provider => {
+	let usedFraction = 0.1;
+	const fetchedProviders: string[] = [];
+	for (const id of ["groq", "xai"]) {
+		await authStorage.credentials.set(id, { type: "api_key", key: `${id}-test` });
+		authStorage.usage.setProvider(id, {
+			id,
+			fetchUsage: async () => {
+				fetchedProviders.push(id);
+				return {
+					provider: id,
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: `${id}:quota`,
+							label: "Quota",
+							scope: { provider: id },
+							amount: { usedFraction, unit: "percent" },
+						},
+					],
+				};
+			},
+		});
+	}
+	const registry = new ModelRegistry(authStorage);
+	const baseUrlResolver = (id: string) => registry.getProviderBaseUrl(id);
+	await authStorage.usage.reports({ baseUrlResolver });
+	usedFraction = 0.9;
+
+	await runUsageCommand({ provider, json: true, noExtensions: true });
+
+	const output = JSON.parse(stdout);
+	const refreshed = output.reports.find((report: { provider: string }) => report.provider === "groq");
+	expect(refreshed.limits[0].amount.usedFraction).toBe(0.9);
+	// The CLI closes its store; verify unrelated endpoints were not polled,
+	// rather than reading from the disposed auth storage.
+	expect(fetchedProviders.filter(id => id === "xai")).toHaveLength(provider ? 1 : 2);
 });

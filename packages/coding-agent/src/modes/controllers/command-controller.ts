@@ -106,6 +106,7 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
+	formatUsageFreshness,
 	summarizeUsageResetCredits,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
@@ -918,6 +919,7 @@ export class CommandController {
 				return;
 			}
 			try {
+				await this.ctx.session.modelRegistry.authStorage.usage.invalidate();
 				usageReports = await provider.fetchUsageReports();
 			} catch (error) {
 				this.ctx.showError(`Failed to fetch usage data: ${error instanceof Error ? error.message : String(error)}`);
@@ -2700,9 +2702,8 @@ export function renderUsageReports(
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const lines: string[] = [];
-	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
-	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
-	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
+	const freshness = formatUsageFreshness(reports, nowMs);
+	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${freshness ? ` (${freshness})` : ""}`)));
 	const grouped = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
@@ -2757,6 +2758,17 @@ export function renderUsageReports(
 		}
 
 		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
+		for (const report of providerReports) {
+			if (report.metadata?.stale !== true) continue;
+			const identity = report.metadata.email ?? report.metadata.accountId ?? "account";
+			const label =
+				provider === "openai-codex"
+					? formatCodexTuiLabel(report, providerReports, String(identity))
+					: String(identity);
+			lines.push(
+				`  ${uiTheme.fg("warning", `${sanitizeText(label)}: ${formatUsageFreshness([report], nowMs)} · last-known quota`)}`,
+			);
+		}
 		const activeReport =
 			provider === "openai-codex" && activeAccount
 				? ((activeAccount.accountId
