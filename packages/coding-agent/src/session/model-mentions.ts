@@ -115,8 +115,8 @@ export class ModelMentionRegistry {
 				const model = this.findMentionable(typed);
 				if (!model) return token;
 				// Store the canonical selector, not the typed token: downstream
-				// model resolution and the authorization check both compare
-				// against `formatModelString`, and a fuzzy token would miss.
+				// model resolution and pseudonym reuse compare against
+				// `formatModelString`, and a fuzzy token would miss.
 				const selector = formatModelString(model);
 				mention = this.#bySelector.get(selector);
 				if (!mention) {

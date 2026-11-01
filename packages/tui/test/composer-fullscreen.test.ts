@@ -111,10 +111,16 @@ describe("composer fullscreen main view", () => {
 		h.composer.stop();
 	});
 
-	it("copies a drag selection as plain text, and a plain click copies nothing", async () => {
+	it("copies a drag selection as plain text, and a plain click copies nothing but reaches the pointer hook", async () => {
 		const h = makeHarness(5, row => `\x1b[31mred ${row}\x1b[0m tail ${row}`);
 		const copies: string[] = [];
-		h.composer.setFullscreenInputHandlers({ copy: text => copies.push(text) });
+		const clicks: { row: number; col: number }[] = [];
+		h.composer.setFullscreenInputHandlers({
+			copy: text => copies.push(text),
+			pointer: event => {
+				if (event.leftClick) clicks.push({ row: event.row, col: event.col });
+			},
+		});
 		await h.settle();
 		const first = h.screen().indexOf("red 1 tail 1");
 		expect(first).toBeGreaterThanOrEqual(0);
@@ -122,9 +128,12 @@ describe("composer fullscreen main view", () => {
 		// Press on "red 1", drag to the "d" of "red 2" on the next row, release.
 		await h.input(sgr(0, first, 0), sgr(32, first + 1, 2), sgr(0, first + 1, 2, true));
 		expect(copies).toEqual(["red 1 tail 1\nred"]);
+		expect(clicks).toEqual([]);
 
+		// A press released on its own cell is a click: extension links drawn there still activate.
 		await h.input(sgr(0, first, 4), sgr(0, first, 4, true));
 		expect(copies).toHaveLength(1);
+		expect(clicks).toEqual([{ row: first, col: 4 }]);
 
 		h.composer.stop();
 	});

@@ -12,11 +12,13 @@ import {
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
+	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { relayExtensionNotice } from "./browser/relay/probe";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -38,7 +40,7 @@ import {
 	type TernTabSession,
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
-import { renderTabCall } from "./browser/tab-call";
+import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
 import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -98,7 +100,9 @@ const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"relay?": type("boolean").describe(
+		"true drives the user's own tabs via the omp browser relay; false skips a relay the settings enable",
+	),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe(
@@ -255,6 +259,12 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 	return createBrowserPreludeDefinition(session, {
 		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
 		status: describeBrowserCall,
+		// The documentation promises omp's own browser for an open without `app`; while
+		// the relay takes that open, the prompt names where `app.relay: false` goes instead.
+		relayFallback:
+			resolveBrowserKind({ action: "open" }, session).kind === "relay"
+				? resolveBrowserKind({ action: "open", app: { relay: false } }, session)
+				: undefined,
 	});
 }
 
@@ -319,7 +329,8 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const timeoutSeconds = clampTimeout("browser", parsed.timeout, cfgToolsMaxTimeout.get(session.settings));
+		const requested = parsed.timeout ?? (parsed.action === "call" ? tabCallBudgetSeconds(parsed.chain) : undefined);
+		const timeoutSeconds = clampTimeout("browser", requested, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };
@@ -410,6 +421,12 @@ async function openOnKind(
 			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 		);
 	}
+	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
+	if (params.ignore_https_errors && kind.kind === "relay") {
+		throw new ToolError(
+			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
+		);
+	}
 
 	// First browser use may have to download Chrome for Testing (~180 MB).
 	// That is a one-time install, not part of the open, so it runs before the
@@ -457,8 +474,15 @@ async function openOnKind(
 		// rolling the fresh browser back on failure.
 		holdBrowser(browser);
 		let result: AcquireTabResult;
-		stage = `opening tab ${JSON.stringify(name)}`;
+		let relayNotice: string | null = null;
 		try {
+			// Read before the tab is acquired, so a cancel or the deadline landing during the read leaves no tab to close.
+			if (kind.kind === "relay") {
+				stage = "reading the relay extension version";
+				relayNotice = await relayExtensionNotice(normalizeConnectedCdpUrl(kind.cdpUrl), openSignal);
+				throwIfAborted(openSignal);
+			}
+			stage = `opening tab ${JSON.stringify(name)}`;
 			const initScripts = await untilAborted(openSignal, () =>
 				resolveInitScriptSources(params.init_scripts, session.cwd),
 			);
@@ -530,6 +554,7 @@ async function openOnKind(
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
+			relayNotice,
 		].filter((line): line is string => typeof line === "string");
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {

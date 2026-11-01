@@ -129,6 +129,20 @@ describe("write agent:// messaging", () => {
 		);
 	});
 
+	it("marks ?progress writes as progress and rejects progress broadcasts", async () => {
+		registerPeer("Scout");
+		registerPeer("Backend", "running", "core");
+		const tool = new WriteTool(makeSession());
+		await tool.execute("ack", { path: "agent://Scout?progress", content: "on it" });
+		expect(received.get("Scout")).toMatchObject([{ to: "Scout", body: "on it", progress: true }]);
+		await expect(tool.execute("all", { path: "agent://all?progress", content: "on it" })).rejects.toThrow(
+			"?progress",
+		);
+		await expect(tool.execute("team", { path: "agent://team:core?progress", content: "on it" })).rejects.toThrow(
+			"?progress",
+		);
+	});
+
 	it("does not duplicate a child broadcast in the main session's relay view", async () => {
 		registerPeer("Sender");
 		registerPeer("Sibling");

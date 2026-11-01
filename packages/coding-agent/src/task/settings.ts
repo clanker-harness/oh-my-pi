@@ -8,6 +8,7 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -31,8 +32,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 
@@ -252,6 +253,19 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+	},
+});
+
 export const cfgTaskStructured = register({
 	id: "task.structured",
 	type: "boolean",
@@ -261,7 +275,7 @@ export const cfgTaskStructured = register({
 		group: "Subagents",
 		label: "Structured Task Results",
 		description:
-			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text. Eval agent()/workpool spawns always keep structured results.",
+			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
 	},
 });
 
@@ -291,32 +305,6 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
-export const cfgTaskEnableModelSelection = register({
-	id: "task.enableModelSelection",
-	type: "boolean",
-	default: true,
-	ui: {
-		tab: "tasks",
-		group: "Subagents",
-		label: "Per-Task Model",
-		description:
-			"Expose the optional model parameter on task spawns, so a subagent can be pinned to a specific model (`provider/id`) or a model role alias. A selector that matches no available model is rejected at preflight instead of silently falling back to the session default.",
-	},
-});
-
-export const cfgTaskAllowedSpawnModels = register({
-	id: "task.allowedSpawnModels",
-	type: "array",
-	default: [] as string[],
-	ui: {
-		tab: "tasks",
-		group: "Subagents",
-		label: "Restrict Spawn Models",
-		description:
-			"Restrict which models a subagent spawn may target. Empty (the default) allows any available model. Set it to lock spawns down to specific selectors; model role aliases stay usable either way.",
-	},
-});
-
 export const cfgTaskTeamsEnabled = register({
 	id: "task.teams.enabled",
 	type: "boolean",
@@ -327,6 +315,73 @@ export const cfgTaskTeamsEnabled = register({
 		label: "Subagent Teams",
 		description:
 			"Expose the batch team parameter and per-item role. Members of one team share a group roster in their system prompt and can broadcast to each other by writing to agent://team:<name>.",
+	},
+});
+
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "eval", "on"] as const,
+	default: "on",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether a subagent call may pick its model: one exact provider/model-id[@upstream][:level] of any available chat model, or a model role alias such as @smol. An @upstream pin is part of the model identity and is supported only by aggregators. A selector that matches no available model is rejected instead of falling back to another model. Project settings can turn it off but not on.",
+		options: [
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
+		],
+	},
+});
+
+/**
+ * Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. The operator's
+ * layers ({@link Settings.grantAuthority}) must enable it; project and subagent-injected settings,
+ * which the live merged value includes, can only turn it off.
+ */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+	return [settings.grantAuthority(), settings].every(layers => {
+		const mode = cfgTaskPerCallModel.get(layers);
+		return mode === "on" || (mode === "eval" && invocationKind === "eval");
+	});
+}
+
+/**
+ * Validates `task.perCallModelAllow`: a list of exact `provider/model-id` strings. A non-string
+ * entry fails load and writes instead of reaching approval as an entry that matches nothing.
+ */
+function validatePerCallModelAllow(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		if (typeof entry === "string") continue;
+		throw new Error(
+			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+		);
+	}
+}
+
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	validate: validatePerCallModelAllow,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		editor: "json",
+		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
+		condition: "perCallModelAllowNotProject",
+		description:
+			"Restricts exact per-call models. Empty (the default): any available chat model. When set, an exact per-call model must be listed: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). Model role aliases (@smol, @slow, …) stay usable either way. A project list can only narrow this one.",
 	},
 });
 
@@ -502,7 +557,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });
